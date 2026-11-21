@@ -191,6 +191,13 @@ class Booking(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Payment (see app/payments.py): "card" (Stripe test mode / demo) or "cash" on pick-up.
+    payment_method: Mapped[str] = mapped_column(String(10), default="cash")
+    # unpaid | paid | refunded (card) · cash_due | cash_received (cash)
+    payment_status: Mapped[str] = mapped_column(String(20), default="cash_due")
+    stripe_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_payment_intent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     item: Mapped[Item] = relationship(back_populates="bookings")
     renter: Mapped[User] = relationship()

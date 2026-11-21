@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api, Calendar, Item, mediaUrl, Review } from '../api';
+import { PaymentMethod, api, Calendar, Item, mediaUrl, Review } from '../api';
 import { useAuth } from '../auth';
 import AvailabilityCalendar, { Selection } from '../components/AvailabilityCalendar';
 import MapEmbed from '../components/MapEmbed';
@@ -51,6 +51,7 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
   const [mode, setMode] = useState<'360' | 'photos'>('360');
   const [sel, setSel] = useState<Selection>({});
   const [askOpen, setAskOpen] = useState(false);
+  const [payWith, setPayWith] = useState<PaymentMethod>('card');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -91,7 +92,7 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
     if (!sel.start) return;
     setBusy(true);
     try {
-      await api.requestBooking({ item_id: item.id, start_date: sel.start, end_date: sel.end ?? sel.start, message });
+      await api.requestBooking({ item_id: item.id, start_date: sel.start, end_date: sel.end ?? sel.start, message, payment_method: payWith });
       setAskOpen(false);
       setSel({});
       setMessage('');
@@ -384,10 +385,41 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
                 <Text style={s.meta}>{money(item.deposit)}</Text>
               </View>
             )}
-            <View style={s.sumRow}>
-              <Text style={s.meta}>Platform fee (kept by Rent a Thing)</Text>
-              <Text style={s.meta}>{money(total * 0.25)}</Text>
-            </View>
+          </View>
+          <Text style={[s.meta, { fontWeight: '700', marginTop: 2 }]}>How do you want to pay?</Text>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            {(
+              [
+                ['card', 'card', 'Card', 'Pay online once confirmed'],
+                ['cash', 'cash', 'Cash', 'Pay the owner at pick-up'],
+              ] as const
+            ).map(([key, icon, label, sub]) => {
+              const on = payWith === key;
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => setPayWith(key)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: on }}
+                  style={{
+                    flex: 1,
+                    gap: 4,
+                    padding: 12,
+                    borderRadius: 16,
+                    borderWidth: 1.5,
+                    borderColor: on ? c.accent : c.separator,
+                    backgroundColor: on ? c.accentSoft : c.surface,
+                  }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name={on ? 'radio-button-on' : 'radio-button-off'} size={18} color={on ? c.accent : c.text3} />
+                    <Ionicons name={icon === 'card' ? 'card-outline' : 'cash-outline'} size={18} color={on ? c.accent : c.text2} />
+                    <Text style={{ fontWeight: '800', color: on ? c.accent : c.text, fontSize: 15 }}>{label}</Text>
+                  </View>
+                  <Text style={[s.meta, { fontSize: 12 }]}>{sub}</Text>
+                </Pressable>
+              );
+            })}
           </View>
           <TextInput
             value={message}
@@ -399,7 +431,9 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
             style={s.message}
           />
           <Button title={`Send request · ${money(total)}`} onPress={requestBooking} loading={busy} />
-          <Text style={[s.meta, { textAlign: 'center', fontSize: 13 }]}>You won’t pay anything until pick-up.</Text>
+          <Text style={[s.meta, { textAlign: 'center', fontSize: 13 }]}>
+            {payWith === 'card' ? 'Nothing is charged until the owner confirms. Demo payments: no real money.' : 'Bring the exact amount; the owner confirms it in the app.'}
+          </Text>
         </View>
       </Modal>
     </View>

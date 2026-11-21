@@ -636,3 +636,107 @@ def test_rent_club_badge_and_chat():
     client.post("/club/read", headers=admin)
     assert client.get("/me/unread", headers=admin).json()["club"] == 0
     assert client.post("/club/messages", headers=fan, json={"body": "   "}).status_code in (400, 422)
+
+
+def _accepted_booking(payment_method, day):
+    item = make_item()
+    b = client.post("/bookings", headers=renter, json={"item_id": item, "start_date": D(day), "end_date": D(day + 1), "payment_method": payment_method})
+    assert b.status_code == 201, b.text
+    bid = b.json()["id"]
+    assert client.post(f"/bookings/{bid}/accept", headers=owner).status_code == 200
+    return bid, b.json()
+
+
+def test_demo_card_payment_and_refund(monkeypatch):
+    from app import payments
+
+    monkeypatch.setattr(payments, "_secret", lambda: "")  # no Stripe key -> built-in demo checkout
+    assert client.get("/payments/config").json()["mode"] == "simulated"
+
+    item = make_item()
+    b = client.post("/bookings", headers=renter, json={"item_id": item, "start_date": D(40), "end_date": D(41), "payment_method": "card"}).json()
+    assert b["payment_method"] == "card" and b["payment_status"] == "unpaid"
+    # can't pay before the owner confirms; owner can't pay
+    assert client.post(f"/bookings/{b['id']}/pay", headers=renter).status_code == 400
+    client.post(f"/bookings/{b['id']}/accept", headers=owner)
+    assert client.post(f"/bookings/{b['id']}/pay", headers=owner).status_code == 403
+    assert client.post(f"/bookings/{b['id']}/pay", headers=renter).json()["mode"] == "simulated"
+
+    card = lambda n, exp="12/39", cvc="123": client.post(f"/bookings/{b['id']}/pay/demo", headers=renter, json={"number": n, "exp": exp, "cvc": cvc})  # noqa: E731
+    assert card("4000 0000 0000 0002").json()["detail"] == "Your card was declined."
+    assert card("1234 5678 9012 3456").status_code == 402  # only test cards
+    assert card("4242 4242 4242 4242", exp="01/20").status_code == 402  # expired
+    assert card("4242 4242 4242 4242", cvc="1").status_code == 402
+    paid = card("4242 4242 4242 4242")
+    assert paid.status_code == 200 and paid.json()["payment_status"] == "paid" and paid.json()["paid_at"]
+    assert card("4242 4242 4242 4242").status_code == 400  # already paid
+    notes = client.get("/notifications", headers=owner).json()["items"]
+    assert notes[0]["kind"] == "payment_received"
+
+    # cancelling a paid booking refunds it
+    r = client.post(f"/bookings/{b['id']}/cancel", headers=owner)
+    assert r.json()["status"] == "cancelled" and r.json()["payment_status"] == "refunded"
+    note = client.get("/notifications", headers=renter).json()["items"][0]
+    assert note["kind"] == "booking_cancelled" and "refunded" in note["body"]
+
+
+def test_cash_payment():
+    bid, b = _accepted_booking("cash", 50)
+    assert b["payment_status"] == "cash_due"
+    assert client.post(f"/bookings/{bid}/pay", headers=renter).status_code == 400  # cash isn't paid online
+    assert client.post(f"/bookings/{bid}/cash-received", headers=renter).status_code == 403
+    r = client.post(f"/bookings/{bid}/cash-received", headers=owner)
+    assert r.json()["payment_status"] == "cash_received"
+
+
+def test_stripe_test_mode(monkeypatch):
+    """Stripe is mocked (no network): checks we create Checkout correctly, confirm, and refund."""
+    import stripe
+
+    from app import payments
+
+    calls = {}
+
+    class FakeSession:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    def create(**params):
+        calls["create"] = params
+        return FakeSession(id="cs_test_123", url="https://checkout.stripe.com/c/pay/cs_test_123")
+
+    def retrieve(sid, **params):
+        calls["retrieve"] = sid
+        return FakeSession(id=sid, payment_status="paid", payment_intent="pi_test_abc", metadata={"booking_id": str(calls["bid"])})
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", staticmethod(create))
+    monkeypatch.setattr(stripe.checkout.Session, "retrieve", staticmethod(retrieve))
+    monkeypatch.setattr(stripe.Refund, "create", staticmethod(lambda **p: calls.setdefault("refund", p)))
+
+    # a live key is ignored: demo only
+    monkeypatch.setattr(payments, "_secret", lambda: "sk_live_nope")
+    assert payments.mode() == "simulated"
+    monkeypatch.setattr(payments, "_secret", lambda: "sk_test_fake")
+    assert client.get("/payments/config").json()["mode"] == "stripe"
+
+    bid, b = _accepted_booking("card", 60)
+    calls["bid"] = bid
+    out = client.post(f"/bookings/{bid}/pay", headers=renter).json()
+    assert out == {"mode": "stripe", "url": "https://checkout.stripe.com/c/pay/cs_test_123", "session_id": "cs_test_123"}
+    p = calls["create"]
+    assert p["mode"] == "payment" and p["metadata"] == {"booking_id": str(bid)}
+    assert p["line_items"][0]["price_data"]["currency"] == "eur"
+    assert p["line_items"][0]["price_data"]["unit_amount"] == int(round(b["total_price"] * 100))
+    assert p["success_url"].endswith(f"/?payment=success&booking={bid}&session_id={{CHECKOUT_SESSION_ID}}")
+    # the demo card endpoint is off in Stripe mode
+    assert client.post(f"/bookings/{bid}/pay/demo", headers=renter, json={"number": "4242424242424242", "exp": "12/39", "cvc": "123"}).status_code == 400
+
+    r = client.post(f"/bookings/{bid}/pay/confirm", headers=renter, json={"session_id": "cs_test_123"})
+    assert r.json()["payment_status"] == "paid"
+    # someone else's session can't be used
+    calls["bid"] = 999999
+    other, _ = _accepted_booking("card", 70)
+    assert client.post(f"/bookings/{other}/pay/confirm", headers=renter, json={"session_id": "cs_test_123"}).status_code == 400
+
+    r = client.post(f"/bookings/{bid}/cancel", headers=renter)
+    assert r.json()["payment_status"] == "refunded" and calls["refund"]["payment_intent"] == "pi_test_abc"

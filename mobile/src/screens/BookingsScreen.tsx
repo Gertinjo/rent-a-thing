@@ -10,6 +10,7 @@ import type { RootStackParamList } from '../navigation';
 import { Alert } from '../platform';
 import { useRealtime } from '../realtime';
 import { UserBadges } from '../components/Badges';
+import PaymentSheet from '../components/PaymentSheet';
 import { fmtRange, isoDay, makeStyles, money, statusStyle, type, useTheme } from '../theme';
 
 type Tab = 'renter' | 'owner';
@@ -24,6 +25,7 @@ export default function BookingsScreen() {
   const [all, setAll] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [paying, setPaying] = useState<Booking | null>(null);
   const { on } = useRealtime();
   const [chatUnread, setChatUnread] = useState<Record<number, number>>({});
   const loadUnread = useCallback(() => {
@@ -83,6 +85,18 @@ export default function BookingsScreen() {
     }
   };
 
+  const cashReceived = async (b: Booking) => {
+    setBusyId(b.id);
+    try {
+      await api.cashReceived(b.id);
+      await load();
+    } catch (e: any) {
+      Alert.alert('Something went wrong', e.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const confirm = (b: Booking, action: 'decline' | 'cancel') =>
     Alert.alert(action === 'decline' ? 'Decline this request?' : b.status === 'pending' ? 'Withdraw your request?' : 'Cancel this booking?', undefined, [
       { text: 'Keep', style: 'cancel' },
@@ -99,6 +113,10 @@ export default function BookingsScreen() {
       actions.push(<Button key="a" size="small" title="Accept" onPress={() => act(b, 'accept')} loading={busyId === b.id} style={{ flex: 1 }} />);
       actions.push(<Button key="d" size="small" variant="secondary" title="Decline" onPress={() => confirm(b, 'decline')} style={{ flex: 1 }} />);
     }
+    if (b.role === 'renter' && b.status === 'accepted' && b.payment_method === 'card' && b.payment_status === 'unpaid')
+      actions.push(<Button key="p" size="small" title={`Pay ${money(b.total_price)}`} icon="card" onPress={() => setPaying(b)} style={{ flex: 1 }} />);
+    if (b.role === 'owner' && b.status === 'accepted' && b.payment_status === 'cash_due')
+      actions.push(<Button key="cash" size="small" variant="secondary" title="Cash received" icon="cash" onPress={() => cashReceived(b)} loading={busyId === b.id} style={{ flex: 1 }} />);
     if (b.role === 'owner' && b.status === 'accepted' && started)
       actions.push(<Button key="r" size="small" title="Mark as returned" onPress={() => act(b, 'complete')} loading={busyId === b.id} style={{ flex: 1 }} />);
     if ((b.status === 'pending' && b.role === 'renter') || (b.status === 'accepted' && !started))
@@ -149,6 +167,7 @@ export default function BookingsScreen() {
                 </Pressable>
               )}
             </View>
+            <PaymentLine b={b} />
             {!!b.message && <Text style={s.msg}>“{b.message}”</Text>}
             {actions.length > 0 && <View style={{ flexDirection: 'row', gap: 8 }}>{actions}</View>}
             {b.reviewed_by_me && <Text style={[s.meta, { fontSize: 13 }]}>You reviewed this rental</Text>}
@@ -191,6 +210,37 @@ export default function BookingsScreen() {
           )
         }
       />
+      <PaymentSheet
+        booking={paying}
+        onClose={() => setPaying(null)}
+        onPaid={(b) => {
+          setPaying(null);
+          load();
+          Alert.alert('Payment done ✓', `${money(b.total_price)} paid by card for ${b.item.title}. This was a demo payment, so no real money moved.`);
+        }}
+      />
+    </View>
+  );
+}
+
+/** "Card · paid ✓", "Cash at pick-up", ... */
+function PaymentLine({ b }: { b: Booking }) {
+  const { c } = useTheme();
+  if (b.status === 'declined' || (b.status === 'cancelled' && b.payment_status !== 'refunded')) return null;
+  const owner = b.role === 'owner';
+  const map: Record<string, [string, string, string]> = {
+    unpaid: ['card-outline', b.status === 'pending' ? 'Card · pay after confirmation' : owner ? 'Card · waiting for payment' : 'Card · not paid yet', c.warning],
+    paid: ['checkmark-circle', `Card · paid ${money(b.total_price)}`, c.success],
+    refunded: ['return-up-back', `Card · ${money(b.total_price)} refunded`, c.text2],
+    cash_due: ['cash-outline', owner ? `Cash · collect ${money(b.total_price)} at pick-up` : `Cash · bring ${money(b.total_price)} to pick-up`, c.text2],
+    cash_received: ['checkmark-circle', `Cash · ${money(b.total_price)} received`, c.success],
+  };
+  const [icon, label, color] = map[b.payment_status] ?? map.cash_due;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+      <Ionicons name={icon as any} size={16} color={color} />
+      <Text style={{ fontSize: 13, fontWeight: '700', color }}>{label}</Text>
+      {b.payment_method === 'card' && <Text style={{ fontSize: 10, fontWeight: '800', color: c.text3 }}>DEMO</Text>}
     </View>
   );
 }

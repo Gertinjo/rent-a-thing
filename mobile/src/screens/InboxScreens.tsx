@@ -27,6 +27,8 @@ const KIND_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
   booking_completed: 'flag',
   review: 'star',
   club_joined: 'ribbon',
+  payment_received: 'card',
+  payment_refunded: 'return-up-back',
   id_verified: 'shield-checkmark',
   id_rejected: 'alert-circle',
 };

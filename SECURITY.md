@@ -24,6 +24,8 @@ Report a problem privately to the team rather than in a public issue.
 | 13 | **Identity documents** (new feature) | ID photos are highly sensitive | They're stored outside the public `/media` folder, fetched only by admins with their token (sent `no-store`), re-encoded to strip EXIF/GPS, and deleted once the check is done. Uploads are limited to 5 per hour. | `app/verification.py` |
 | 14 | **Club chat access** | Non-members reading the group chat | Server checks membership (or admin) on every read and send, over both HTTP and the socket | `app/club.py` |
 
+| 15 | **Payments** (new feature) | Charging real cards, or faking a payment | Demo only: live Stripe keys are refused. Card numbers never touch our server in Stripe mode, because Stripe hosts the card page. "Paid" is set only after the server checks with Stripe that the session is paid and belongs to that booking, so a URL alone can't mark it paid. Only the renter can pay, and only the owner can confirm cash. | `app/payments.py` |
+
 ### Rate limits (per IP, or per user for chat)
 
 | Endpoint | Limit |

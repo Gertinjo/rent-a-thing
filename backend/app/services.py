@@ -83,6 +83,12 @@ def auto_complete_finished(db: Session) -> None:
         .where(Booking.status == BookingStatus.ACCEPTED, Booking.end_date < date.today())
         .values(status=BookingStatus.COMPLETED)
     )
+    # A finished cash rental was paid at pick-up.
+    db.execute(
+        update(Booking)
+        .where(Booking.status == BookingStatus.COMPLETED, Booking.payment_status == "cash_due")
+        .values(payment_status="cash_received")
+    )
     increment_rental_counts(db)
     db.commit()
 
@@ -344,6 +350,14 @@ def booking_out(db: Session, booking: Booking, me: User) -> schemas.BookingOut:
         message=booking.message,
         created_at=booking.created_at,
         role=role,
+        payment_method=booking.payment_method,
+        payment_status=booking.payment_status,
+        paid_at=booking.paid_at,
         can_review=booking.status == BookingStatus.COMPLETED and not reviewed,
         reviewed_by_me=reviewed,
     )
+
+
+def money(v: float) -> str:
+    """€12 or €12.50"""
+    return f"€{v:.0f}" if float(v).is_integer() else f"€{v:.2f}"

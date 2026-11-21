@@ -12,9 +12,10 @@ function resolveBaseUrl(): string {
   if (fromEnv) return fromEnv.replace(/\/$/, '');
   // In a browser (laptop or a phone on the same Wi-Fi) the API lives on the same machine that served the page.
   if (Platform.OS === 'web' && typeof window !== 'undefined') {
-    // Served by the FastAPI server itself (port 8000): same address. From the Expo dev server: port 8000.
+    // Served by the FastAPI server itself (any port, incl. 80/443 in production): same address.
+    // From the Expo web dev server (8081/19006): the API runs on port 8000 of the same machine.
     const { protocol, hostname, port, origin } = window.location;
-    return port === '8000' ? origin : `${protocol}//${hostname}:8000`;
+    return port === '8081' || port === '19006' ? `${protocol}//${hostname}:8000` : origin;
   }
   const hostUri = Constants.expoConfig?.hostUri ?? '';
   const host = hostUri.split(':')[0];
@@ -172,8 +173,20 @@ export interface Booking {
   message: string;
   created_at: string;
   role: 'renter' | 'owner';
+  payment_method: PaymentMethod;
+  payment_status: PaymentStatus;
+  paid_at: string | null;
   can_review: boolean;
   reviewed_by_me: boolean;
+}
+export type PaymentMethod = 'card' | 'cash';
+export type PaymentStatus = 'unpaid' | 'paid' | 'refunded' | 'cash_due' | 'cash_received';
+export interface PaymentConfig {
+  /** 'stripe' = Stripe Checkout in test mode; 'simulated' = built-in demo checkout (no key) */
+  mode: 'stripe' | 'simulated';
+  currency: string;
+  demo: boolean;
+  test_cards: { number: string; result: string }[];
 }
 export interface Review {
   id: number;
@@ -373,8 +386,13 @@ export const api = {
   itemReviews: (id: number) => request<Review[]>('GET', `/items/${id}/reviews`),
 
   bookings: (role: 'renter' | 'owner' | 'all' = 'all') => request<Booking[]>('GET', `/bookings?role=${role}`),
-  requestBooking: (b: { item_id: number; start_date: string; end_date: string; message: string }) =>
+  requestBooking: (b: { item_id: number; start_date: string; end_date: string; message: string; payment_method: PaymentMethod }) =>
     request<Booking>('POST', '/bookings', b),
+  paymentConfig: () => request<PaymentConfig>('GET', '/payments/config'),
+  startPayment: (id: number) => request<{ mode: 'stripe' | 'simulated'; url?: string; session_id?: string }>('POST', `/bookings/${id}/pay`),
+  confirmPayment: (id: number, session_id?: string) => request<Booking>('POST', `/bookings/${id}/pay/confirm`, { session_id }),
+  demoPayment: (id: number, card: { number: string; exp: string; cvc: string }) => request<Booking>('POST', `/bookings/${id}/pay/demo`, card),
+  cashReceived: (id: number) => request<Booking>('POST', `/bookings/${id}/cash-received`),
   bookingAction: (id: number, action: 'accept' | 'decline' | 'cancel' | 'complete') =>
     request<Booking>('POST', `/bookings/${id}/${action}`),
   review: (b: { booking_id: number; rating: number; comment: string }) => request<Review>('POST', '/reviews', b),

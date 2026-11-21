@@ -220,6 +220,7 @@ class CalendarOut(BaseModel):
 class BookingCreate(DateRange):
     item_id: int
     message: str = ""
+    payment_method: Literal["card", "cash"] = "card"
 
 
 class BookingOut(BaseModel):
@@ -238,6 +239,9 @@ class BookingOut(BaseModel):
     message: str
     created_at: datetime
     role: Literal["renter", "owner"]
+    payment_method: str = "cash"
+    payment_status: str = "cash_due"
+    paid_at: datetime | None = None
     can_review: bool
     reviewed_by_me: bool
 

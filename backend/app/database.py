@@ -68,6 +68,11 @@ _ADDED_COLUMNS = {
     "bookings": {
         "platform_fee": "FLOAT NOT NULL DEFAULT 0",
         "owner_payout": "FLOAT NOT NULL DEFAULT 0",
+        "payment_method": "VARCHAR(10) NOT NULL DEFAULT 'cash'",
+        "payment_status": "VARCHAR(20) NOT NULL DEFAULT 'cash_due'",
+        "stripe_session_id": "VARCHAR(255)",
+        "stripe_payment_intent": "VARCHAR(255)",
+        "paid_at": "DATETIME",
     },
     "contact_messages": {
         "status": "VARCHAR(20) NOT NULL DEFAULT 'open'",
@@ -89,6 +94,9 @@ def upgrade_schema() -> None:
             for name, ddl in cols.items():
                 if name not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+        if insp.has_table("bookings"):
+            # Rentals that finished before payments existed were settled in person.
+            conn.execute(text("UPDATE bookings SET payment_status = 'cash_received' WHERE status = 'completed' AND payment_status = 'cash_due'"))
         if insp.has_table("items"):
             from .models import LEGACY_CATEGORIES
 

@@ -99,6 +99,14 @@ Sports · Kids & baby · Home & cleaning · Music · Travel · Other
 - **Rent Club.** After 5 completed rentals you get a gold **Rent Club** badge (on your profile, listings, bookings and chats), the club discount and the **members' group chat**, which is live over Socket.IO. Find it under Profile → Rent Club; non-members see their progress there. Admins can read and post as moderators.
 - **ID verification.** Every user uploads a photo of an ID card, passport or driving licence plus a selfie (Profile → ID verification). Booking and listing stay locked until an admin approves the ID in the desktop admin under **ID checks**. The photos are re-encoded, stored outside `/media` in `backend/private/` (git-ignored), viewable only by admins, and deleted as soon as an admin decides. Verified users get a blue shield badge. Admins can switch the requirement off under Settings → *Require ID verification*.
 
+## Payments: card (Stripe, demo) or cash
+
+- When requesting a booking the renter picks **Card** (pay online once the owner confirms) or **Cash** (pay the owner at pick-up).
+- **Card, DEMO only.** With no key the app uses a built-in demo checkout that accepts Stripe's test cards: `4242 4242 4242 4242` succeeds, `4000 0000 0000 0002` is declined. For real **Stripe Checkout in test mode**, put `STRIPE_SECRET_KEY=sk_test_...` in `backend/.env`; no restart is needed. Live keys are ignored on purpose. After paying, Stripe sends the browser back to the app, which confirms the payment with Stripe, so no webhook is needed on a laptop. `/payments/webhook` is optional and needs `STRIPE_WEBHOOK_SECRET`.
+- **Refunds.** Cancelling a paid booking, by the renter, the owner or an admin, refunds it automatically (a Stripe test refund).
+- **Cash.** The owner taps **Cash received**. Marking the item returned also counts as paid.
+- Owners are notified when a card payment arrives. The admin bookings table has a Payment column.
+
 ## Run it
 
 ### 1. Backend

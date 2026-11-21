@@ -56,6 +56,10 @@ const BOOKING = {
   pending: ['Awaiting reply', 'amber'], accepted: ['Confirmed', 'green'], completed: ['Completed', ''],
   declined: ['Declined', 'red'], cancelled: ['Cancelled', ''],
 };
+const PAYMENT = {
+  unpaid: ['Card · unpaid', 'amber'], paid: ['Card · paid', 'green'], refunded: ['Card · refunded', ''],
+  cash_due: ['Cash · due', ''], cash_received: ['Cash · received', 'green'],
+};
 const REVIEW = { pending: ['In review', 'amber'], approved: ['Approved', 'green'], rejected: ['Rejected', 'red'] };
 const TOPIC = { general: ['Question', 'blue'], booking: ['Booking', 'amber'], safety: ['Safety', 'red'], bug: ['Bug', 'purple'], feedback: ['Idea', 'green'] };
 const pill = ([label, color]) => `<span class="pill ${color}">${esc(label)}</span>`;
@@ -432,12 +436,12 @@ const VIEWS = {
     return `${header('Bookings', `${plural(rows.length, 'booking')} shown · fees earned <b style="color:var(--text)">${money(earned)}</b> · ${money(upcoming)} from confirmed bookings`)}
       <div class="toolbar">${searchBox('bookings.q', st.q, 'Search item title')}
         ${tabs('bookings.status', [['all', 'All'], ['pending', 'Awaiting reply'], ['accepted', 'Confirmed'], ['completed', 'Completed'], ['cancelled', 'Cancelled'], ['declined', 'Declined']], st.status)}</div>
-      <div class="card">${rows.length ? `<table><thead><tr><th>Item</th><th>Borrower → owner</th><th>Dates</th><th>Renter pays</th><th>Service fee</th><th>Owner gets</th><th>Status</th><th>Requested</th></tr></thead><tbody>
+      <div class="card">${rows.length ? `<table><thead><tr><th>Item</th><th>Borrower → owner</th><th>Dates</th><th>Renter pays</th><th>Service fee</th><th>Owner gets</th><th>Payment</th><th>Status</th><th>Requested</th></tr></thead><tbody>
         ${rows.map((b) => `<tr data-act="booking" data-id="${b.id}">
           <td><div class="cell"><img class="thumb" src="${esc(media(b.cover_url))}" alt=""><div class="t ellipsis">${esc(b.item_title)}</div></div></td>
           <td>${esc(b.renter_name)} → ${esc(b.owner_name)}</td><td>${range(b.start_date, b.end_date)} <span class="tiny">(${plural(b.days, 'day')})</span></td>
           <td>${money(b.total_price)}</td><td>${feeCell(b)}</td><td>${money(b.owner_payout)}</td>
-          <td>${pill(BOOKING[b.status])}</td><td class="tiny">${ago(b.created_at)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty"><b>No bookings here</b></div>'}</div>`;
+          <td>${pill(PAYMENT[b.payment_status] || [b.payment_status, ''])}</td><td>${pill(BOOKING[b.status])}</td><td class="tiny">${ago(b.created_at)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty"><b>No bookings here</b></div>'}</div>`;
   },
 
   async reviews() {
@@ -619,7 +623,8 @@ function bookingDrawer(b) {
     <div class="cell"><img class="thumb" style="width:72px;height:72px" src="${esc(media(b.cover_url))}" alt=""><div><div class="t" style="font-size:16px">${esc(b.item_title)}</div>${pill(BOOKING[b.status])}</div></div>
     ${kv([['Borrower', esc(b.renter_name)], ['Owner', esc(b.owner_name)], ['Dates', `${range(b.start_date, b.end_date)} (${plural(b.days, 'day')})`], ['Renter pays', money(b.total_price)],
       ['Service fee', `${money(b.platform_fee)}${b.total_price ? ` (${Math.round((b.platform_fee / b.total_price) * 100)}%)` : ''}${['declined', 'cancelled'].includes(b.status) ? ' · not charged' : ''}`],
-      ['Owner gets', money(b.owner_payout)], ['Requested', ago(b.created_at)]])}
+      ['Owner gets', money(b.owner_payout)], ['Payment', `${esc((PAYMENT[b.payment_status] || [b.payment_status])[0])}${b.paid_at ? ` · ${ago(b.paid_at)}` : ''}${b.payment_method === 'card' ? ' · demo' : ''}`],
+      ['Requested', ago(b.created_at)]])}
     ${b.message ? `<div class="quote">${esc(b.message)}</div>` : ''}
     ${['pending', 'accepted'].includes(b.status) ? `${reasonBox('Why cancel? (saved in the audit log)')}<div><button class="btn bad" data-act="cancel-booking" data-id="${b.id}">Cancel booking</button></div>` : ''}`);
 }

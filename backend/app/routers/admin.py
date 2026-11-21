@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import ai, chat, schemas, services, verification
+from .. import ai, chat, payments, schemas, services, verification
 from ..database import get_db
 from ..deps import require_admin
 from ..models import AdminAction, Booking, BookingStatus, ContactMessage, IdStatus, Item, Review, Review_, SpinFrame, User
@@ -162,6 +162,9 @@ class AdminBookingOut(BaseModel):
     status: str
     message: str
     created_at: datetime
+    payment_method: str = "cash"
+    payment_status: str = "cash_due"
+    paid_at: datetime | None = None
 
 
 class ReasonIn(BaseModel):
@@ -490,6 +493,9 @@ def _booking_out(b: Booking) -> AdminBookingOut:
         status=b.status,
         message=b.message,
         created_at=b.created_at,
+        payment_method=b.payment_method,
+        payment_status=b.payment_status,
+        paid_at=b.paid_at,
     )
 
 
@@ -516,8 +522,9 @@ def cancel_booking(booking_id: int, body: ReasonIn, admin: User = Depends(requir
         raise HTTPException(404, "Booking not found")
     if b.status not in (BookingStatus.PENDING, BookingStatus.ACCEPTED):
         raise HTTPException(400, f"Booking is already {b.status}")
+    refunded = payments.refund_if_paid(b)
     b.status = BookingStatus.CANCELLED
-    _log(db, admin, "cancel_booking", "booking", b.id, f"{b.item.title} · {b.renter.name}", body.reason)
+    _log(db, admin, "cancel_booking", "booking", b.id, f"{b.item.title} · {b.renter.name}" + (" · refunded" if refunded else ""), body.reason)
     db.commit()
     return _booking_out(b)
 

@@ -9,6 +9,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from './src/auth';
 import GlassTabBar from './src/components/GlassTabBar';
 import { navigationRef, type RootStackParamList } from './src/navigation';
+import { usePaymentReturn } from './src/paymentReturn';
 import { RealtimeProvider, useRealtime } from './src/realtime';
 import { AdminApprovalsScreen, AdminHomeScreen, AdminInboxScreen } from './src/screens/AdminScreens';
 import { LoginScreen, RegisterScreen } from './src/screens/AuthScreens';
@@ -63,6 +64,7 @@ function Tabs() {
 
 function Root() {
   const { user, loading } = useAuth();
+  usePaymentReturn(!!user);
   const { c } = useTheme();
   if (loading) {
     return (

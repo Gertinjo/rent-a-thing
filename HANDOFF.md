@@ -78,6 +78,14 @@ handles availability calendars + booking requests; reviews after each rental. Ex
 - Previous designs: `design-archive/ios-glass-2026-11-21/` and `design-archive/explore-v2-2026-11-21/`.
 - Test listings without photos and duplicate Canon listings were deleted on request (DB backup kept in scratchpad).
 
+## Payments: card (Stripe test/demo) or cash (2026-11-21, latest)
+- `app/payments.py`: mode "stripe" when `STRIPE_SECRET_KEY` starts with sk_test_ (Checkout Session, confirmed by retrieving the session on return; refund via `stripe.Refund.create`), otherwise "simulated" (`/bookings/{id}/pay/demo` accepts Stripe test card numbers). Live keys are refused.
+- Booking columns: payment_method, payment_status (unpaid/paid/refunded/cash_due/cash_received), stripe_session_id, stripe_payment_intent, paid_at. Old completed bookings are marked cash_received.
+- Routes in `routers/bookings.py`: `/payments/config`, `/bookings/{id}/pay`, `/pay/confirm`, `/pay/demo`, `/cash-received`, `/payments/webhook`. Cancel (user or admin) refunds paid cards.
+- App: card/cash choice in the request sheet (ItemDetail), `components/PaymentSheet.tsx`, `paymentReturn.ts` (handles `?payment=success&booking=&session_id=` after Stripe), payment line + Pay / Cash received buttons in Bookings.
+- Fixed: the request sheet showed a wrong "25% platform fee" to renters (the 10% fee comes out of the owner's payout). The web app now uses the server it was loaded from (it used to force port 8000, which broke Docker behind 80/443).
+- Stripe library: `stripe` (17.x) in requirements.txt. DB backup: `backend/backups/rentathing-before-payments-*.db`.
+
 ## Rent Club + ID verification (2026-11-21, latest)
 - Club: `app/club.py`, routes in `app/routers/club_routes.py` (`/club`, `/club/messages`, `/club/read`), Socket.IO events `club_join`/`club_send`/`club_read` → `club_message` in room "club". Threshold `CLUB_MIN_RENTALS = 5` in models.py. A `club_joined` notification is sent on joining.
 - ID: `app/verification.py`, `/me/verification` (multipart: doc_type, front, selfie), admin `/admin/verifications` (+ image endpoints and a decide endpoint). Files live in `PRIVATE_DIR` (backend/private, or /data/private in Docker) and are deleted on decision. Setting `require_id` (default on) blocks `POST /bookings` and `POST /items` for unverified non-admins.

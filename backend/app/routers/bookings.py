@@ -1,11 +1,12 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import chat, schemas, services
+from .. import chat, payments, schemas, services
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import Booking, BookingStatus, Item, Notification, Review, User
@@ -81,6 +82,8 @@ def request_booking(
         platform_fee=0.0,
         owner_payout=0.0,
         message=body.message.strip(),
+        payment_method=body.payment_method,
+        payment_status=payments.initial_status(body.payment_method),
     )
     # Apply platform fee (admin keeps a %, owner gets the rest).
     fee_percent = float(services.get_setting_str(db, "platform_fee_percent"))
@@ -90,7 +93,7 @@ def request_booking(
     db.commit()
     db.refresh(b)
     _tell(db, item.owner_id, "booking_request", f"New request from {_first(user.name)}",
-          f"{item.title} · {b.start_date:%b %d} – {b.end_date:%b %d}", b)
+          f"{item.title} · {b.start_date:%b %d} – {b.end_date:%b %d} · {'card' if b.payment_method == 'card' else 'cash on pick-up'}", b)
     return services.booking_out(db, b, user)
 
 
@@ -172,10 +175,14 @@ def cancel(booking_id: int, user: User = Depends(get_current_user), db: Session 
         raise HTTPException(400, f"Booking is {b.status}")
     if b.status == BookingStatus.ACCEPTED and b.start_date <= date.today():
         raise HTTPException(400, "The rental has already started")
+    refunded = payments.refund_if_paid(b)  # raises (and keeps the booking) if Stripe can't refund
     b.status = BookingStatus.CANCELLED
     db.commit()
     other = b.item.owner_id if user.id == b.renter_id else b.renter_id
-    _tell(db, other, "booking_cancelled", f"{_first(user.name)} cancelled", f"{b.item.title} · {b.start_date:%b %d} – {b.end_date:%b %d}", b)
+    note = f" · {services.money(b.total_price)} refunded to the card" if refunded else ""
+    _tell(db, other, "booking_cancelled", f"{_first(user.name)} cancelled", f"{b.item.title} · {b.start_date:%b %d} – {b.end_date:%b %d}{note}", b)
+    if refunded and other != b.renter_id:
+        _tell(db, b.renter_id, "payment_refunded", "Refund on its way", f"{services.money(b.total_price)} for {b.item.title} (demo payment)", b)
     return services.booking_out(db, b, user)
 
 
@@ -190,6 +197,8 @@ def complete(booking_id: int, user: User = Depends(get_current_user), db: Sessio
     if b.start_date > date.today():
         raise HTTPException(400, "The rental hasn't started yet")
     b.status = BookingStatus.COMPLETED
+    if b.payment_status == payments.CASH_DUE:  # returned, so the cash was handled at pick-up
+        b.payment_status = payments.CASH_RECEIVED
     joined = services.increment_rental_counts(db)
     db.commit()
     if b.renter_id in joined:  # the welcome note was stored by increment_rental_counts; push it live
@@ -224,3 +233,91 @@ def leave_review(body: schemas.ReviewCreate, user: User = Depends(get_current_us
     _tell(db, review.reviewee_id, "review", f"{_first(user.name)} left you a {body.rating}★ review", (body.comment or b.item.title)[:140], b)
     db.refresh(review)
     return review
+
+
+# ---------------------------------------------------------------------------
+# payments (card via Stripe test mode / demo checkout, or cash) — see app/payments.py
+# ---------------------------------------------------------------------------
+
+
+class DemoCard(BaseModel):
+    number: str = Field(max_length=30)
+    exp: str = Field(max_length=7)
+    cvc: str = Field(max_length=4)
+
+
+class ConfirmIn(BaseModel):
+    session_id: str | None = Field(default=None, max_length=255)
+
+
+def _renter_booking(db: Session, booking_id: int, user: User) -> Booking:
+    b = _get_booking(db, booking_id, user)
+    if b.renter_id != user.id:
+        raise HTTPException(403, "Only the renter pays")
+    return b
+
+
+def _paid(db: Session, b: Booking) -> None:
+    _tell(db, b.item.owner_id, "payment_received", f"{_first(b.renter.name)} paid {services.money(b.total_price)}",
+          f"{b.item.title} · card (demo payment). You get {services.money(b.owner_payout)}.", b)
+
+
+@router.get("/payments/config", tags=["payments"])
+def payment_config():
+    return payments.config()
+
+
+@router.post("/bookings/{booking_id}/pay", tags=["payments"])
+def start_payment(booking_id: int, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Card payment. Stripe mode: returns a Checkout URL (test mode). Simulated mode: use /pay/demo."""
+    b = _renter_booking(db, booking_id, user)
+    out = payments.start_checkout(b, str(request.base_url))
+    db.commit()
+    return out
+
+
+@router.post("/bookings/{booking_id}/pay/confirm", response_model=schemas.BookingOut, tags=["payments"])
+def confirm_payment(booking_id: int, body: ConfirmIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """After Stripe Checkout redirects back: check with Stripe that it was paid."""
+    b = _renter_booking(db, booking_id, user)
+    if payments.confirm_stripe(b, body.session_id):
+        db.commit()
+        _paid(db, b)
+    return services.booking_out(db, b, user)
+
+
+@router.post("/bookings/{booking_id}/pay/demo", response_model=schemas.BookingOut, tags=["payments"])
+def demo_payment(booking_id: int, card: DemoCard, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Built-in demo checkout (no Stripe key): accepts Stripe's test card numbers only."""
+    b = _renter_booking(db, booking_id, user)
+    payments.pay_simulated(b, card.number, card.exp, card.cvc)
+    db.commit()
+    _paid(db, b)
+    return services.booking_out(db, b, user)
+
+
+@router.post("/bookings/{booking_id}/cash-received", response_model=schemas.BookingOut, tags=["payments"])
+def cash_received(booking_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    b = _get_booking(db, booking_id, user)
+    if b.item.owner_id != user.id:
+        raise HTTPException(403, "Only the owner can confirm cash")
+    if b.payment_method != payments.CASH or b.status not in (BookingStatus.ACCEPTED, BookingStatus.COMPLETED):
+        raise HTTPException(400, "Nothing to confirm")
+    if b.payment_status != payments.CASH_RECEIVED:
+        b.payment_status = payments.CASH_RECEIVED
+        b.paid_at = datetime.utcnow()
+        db.commit()
+        _tell(db, b.renter_id, "payment_received", "Cash payment confirmed", f"{_first(user.name)} got {services.money(b.total_price)} for {b.item.title}", b)
+    return services.booking_out(db, b, user)
+
+
+@router.post("/payments/webhook", tags=["payments"], include_in_schema=False)
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """Optional (needs a public URL, e.g. `stripe listen --forward-to localhost:8000/payments/webhook`)."""
+    kind, booking_id, intent = payments.handle_webhook(await request.body(), request.headers.get("stripe-signature"))
+    if kind == "checkout.session.completed" and booking_id:
+        b = db.get(Booking, booking_id)
+        if b and b.payment_method == payments.CARD and payments._mark_paid(b, intent):
+            db.commit()
+            _paid(db, b)
+    return {"received": True}
