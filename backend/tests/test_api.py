@@ -6,6 +6,7 @@ from pathlib import Path
 _tmp = Path(tempfile.mkdtemp())
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp / 'test.db'}"
 os.environ["MEDIA_DIR"] = str(_tmp / "media")
+os.environ["PRIVATE_DIR"] = str(_tmp / "private")
 os.environ["AI_DISABLED"] = "1"  # never call the real AI from tests
 os.environ["RATE_LIMIT_DISABLED"] = "1"  # re-enabled only in test_rate_limiter
 
@@ -24,6 +25,7 @@ from app.database import SessionLocal as _Session  # noqa: E402
 with _Session() as _db:
     _services.set_setting(_db, "approve_users", False)
     _services.set_setting(_db, "approve_listings", False)
+    _services.set_setting(_db, "require_id", False)  # test_id_verification turns it on
     _db.commit()
 D = lambda n: (date.today() + timedelta(days=n)).isoformat()  # noqa: E731
 
@@ -246,6 +248,7 @@ def test_approvals_and_settings():
     assert client.patch("/admin/settings", headers=boss, json={"approve_users": True, "approve_listings": True}).json() == {
         "approve_users": True,
         "approve_listings": True,
+        "require_id": False,
         "platform_fee_percent": 10,
     }
     newbie = register("newbie")
@@ -507,3 +510,129 @@ def test_security_basics():
     assert r.status_code == 413
     # tampered token is rejected
     assert client.get("/users/me", headers={"Authorization": "Bearer " + "x" * 40}).status_code == 401
+
+
+def _photo(w=640, h=420, shade=120):
+    return cv2.imencode(".jpg", np.full((h, w, 3), shade, np.uint8))[1].tobytes()
+
+
+def test_id_verification():
+    from app.database import PRIVATE_DIR, SessionLocal
+
+    admin = _make_admin("idboss")
+    with SessionLocal() as db:
+        _services.set_setting(db, "require_id", True)
+        db.commit()
+    try:
+        newbie = register("idnewbie")
+        me = client.get("/users/me", headers=newbie).json()
+        assert me["id_status"] == "none" and me["id_required"] and me["id_verified"] is False
+
+        # unverified users can't book or list
+        r = client.post("/items", headers=newbie, json={"title": "Saw", "category": "tools", "price_per_day": 5, "terms_accepted": True})
+        assert r.status_code == 403 and "verify your ID" in r.json()["detail"]
+        item = client.post("/items", headers=admin, json={"title": "Tent", "category": "camping", "price_per_day": 9, "terms_accepted": True}).json()["id"]
+        r = client.post("/bookings", headers=newbie, json={"item_id": item, "start_date": D(3), "end_date": D(3)})
+        assert r.status_code == 403
+
+        # bad uploads are refused
+        files = {"front": ("id.jpg", b"not an image", "image/jpeg"), "selfie": ("me.jpg", _photo(), "image/jpeg")}
+        assert client.post("/me/verification", headers=newbie, data={"doc_type": "passport"}, files=files).status_code == 400
+        files = {"front": ("id.jpg", _photo(100, 80), "image/jpeg"), "selfie": ("me.jpg", _photo(), "image/jpeg")}
+        assert client.post("/me/verification", headers=newbie, data={"doc_type": "passport"}, files=files).status_code == 400
+        files = {"front": ("id.jpg", _photo(), "image/jpeg"), "selfie": ("me.jpg", _photo(), "image/jpeg")}
+        assert client.post("/me/verification", headers=newbie, data={"doc_type": "selfie"}, files=files).status_code == 400
+
+        # good upload -> pending, still blocked
+        r = client.post("/me/verification", headers=newbie, data={"doc_type": "id_card"}, files=files)
+        assert r.status_code == 200 and r.json()["status"] == "pending", r.text
+        assert "being checked" in client.post("/bookings", headers=newbie, json={"item_id": item, "start_date": D(3), "end_date": D(3)}).json()["detail"]
+
+        # images are private: not under /media, only admins can fetch them
+        uid = client.get("/users/me", headers=newbie).json()["id"]
+        assert client.get(f"/admin/verifications/{uid}/front", headers=newbie).status_code == 403
+        queue = client.get("/admin/verifications", headers=admin).json()
+        row = next(v for v in queue if v["user_id"] == uid)
+        assert row["has_front"] and row["has_selfie"] and row["doc_type"] == "id_card"
+        img = client.get(f"/admin/verifications/{uid}/selfie", headers=admin)
+        assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg"
+        assert client.get("/admin/stats", headers=admin).json()["pending_ids"] >= 1
+        assert len(list((PRIVATE_DIR / "ids" / str(uid)).iterdir())) == 2
+
+        # reject -> files deleted, user told why, can resubmit
+        r = client.post(f"/admin/verifications/{uid}", headers=admin, json={"decision": "rejected", "note": "Photo is blurry."})
+        assert r.json()["id_status"] == "rejected" and not r.json()["has_front"]
+        assert list((PRIVATE_DIR / "ids" / str(uid)).iterdir()) == []
+        me = client.get("/users/me", headers=newbie).json()
+        assert me["id_status"] == "rejected" and me["id_note"] == "Photo is blurry."
+        notes = client.get("/notifications", headers=newbie).json()["items"]
+        assert notes[0]["kind"] == "id_rejected"
+
+        client.post("/me/verification", headers=newbie, data={"doc_type": "passport"}, files=files)
+        r = client.post(f"/admin/verifications/{uid}", headers=admin, json={"decision": "verified"})
+        assert r.json()["id_status"] == "verified"
+        assert client.get("/users/me", headers=newbie).json()["id_verified"] is True
+        # verified: booking works and the badge is public
+        b = client.post("/bookings", headers=newbie, json={"item_id": item, "start_date": D(3), "end_date": D(3)})
+        assert b.status_code == 201, b.text
+        assert b.json()["renter"]["id_verified"] is True
+        # can't resubmit once verified
+        assert client.post("/me/verification", headers=newbie, data={"doc_type": "passport"}, files=files).status_code == 400
+    finally:
+        with SessionLocal() as db:
+            _services.set_setting(db, "require_id", False)
+            db.commit()
+
+
+def test_rent_club_badge_and_chat():
+    from app.database import SessionLocal
+    from app.models import CLUB_MIN_RENTALS, Booking, BookingStatus, User
+
+    lender = register("clublender")
+    fan = register("clubfan")
+    outsider = register("clubout")
+    admin = _make_admin("clubboss")
+    items = [client.post("/items", headers=lender, json={"title": f"Thing {i}", "category": "tools", "price_per_day": 10, "terms_accepted": True}).json()["id"] for i in range(CLUB_MIN_RENTALS)]
+
+    info = client.get("/club", headers=fan).json()
+    assert info["is_member"] is False and info["needed"] == CLUB_MIN_RENTALS and info["rentals"] == 0
+    assert client.get("/club/messages", headers=fan).status_code == 403
+    assert client.post("/club/messages", headers=fan, json={"body": "let me in"}).status_code == 403
+
+    # complete rentals one by one; the last one makes them a member
+    ids = []
+    for n, item in enumerate(items):
+        b = client.post("/bookings", headers=fan, json={"item_id": item, "start_date": D(1), "end_date": D(1)}).json()
+        client.post(f"/bookings/{b['id']}/accept", headers=lender)
+        ids.append(b["id"])
+    with SessionLocal() as db:  # pretend the rentals already started
+        db.query(Booking).filter(Booking.id.in_(ids)).update({"start_date": date.today()}, synchronize_session=False)
+        db.commit()
+    for n, bid in enumerate(ids):
+        assert client.post(f"/bookings/{bid}/complete", headers=lender).status_code == 200
+        me = client.get("/users/me", headers=fan).json()
+        assert me["club_member"] is (n + 1 >= CLUB_MIN_RENTALS)
+
+    me = client.get("/users/me", headers=fan).json()
+    assert me["rental_count"] == CLUB_MIN_RENTALS
+    notes = client.get("/notifications", headers=fan).json()["items"]
+    assert any(x["kind"] == "club_joined" for x in notes)
+    with SessionLocal() as db:
+        fan_id = db.query(User).filter(User.email == "clubfan@x.com").one().id
+    # the badge shows to others (e.g. on the booking, seen by the lender)
+    b = client.get(f"/bookings/{ids[0]}", headers=lender).json()
+    assert b["renter"]["club_member"] is True and b["renter"]["id"] == fan_id
+
+    # members' chat
+    info = client.get("/club", headers=fan).json()
+    assert info["is_member"] and info["can_chat"] and any(m["id"] == fan_id for m in info["members"])
+    m = client.post("/club/messages", headers=fan, json={"body": "Hi club!"})
+    assert m.status_code == 201 and m.json()["sender"]["name"] == "clubfan"
+    assert client.get("/club/messages", headers=outsider).status_code == 403
+    # admins can moderate: read + see unread
+    assert client.get("/club", headers=admin).json()["unread"] >= 1
+    assert client.get("/club/messages", headers=admin).json()[-1]["body"] == "Hi club!"
+    assert client.get("/me/unread", headers=admin).json()["club"] >= 1
+    client.post("/club/read", headers=admin)
+    assert client.get("/me/unread", headers=admin).json()["club"] == 0
+    assert client.post("/club/messages", headers=fan, json={"body": "   "}).status_code in (400, 422)

@@ -9,3 +9,5 @@ mobile/.expo/
 mobile/dist/
 backend/.env
 backend/.secret_key
+backend/backups/
+backend/private/

@@ -8,6 +8,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'rentathing.db'}")
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", BASE_DIR / "media"))
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+# ID documents: private, never served as static files. Only admins can view them, through the API.
+PRIVATE_DIR = Path(os.getenv("PRIVATE_DIR", BASE_DIR / "private"))
+PRIVATE_DIR.mkdir(parents=True, exist_ok=True)
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
@@ -44,6 +47,14 @@ _ADDED_COLUMNS = {
         "approval_status": "VARCHAR(20) NOT NULL DEFAULT 'approved'",
         "approval_note": "VARCHAR(300) NOT NULL DEFAULT ''",
         "rental_count": "INTEGER NOT NULL DEFAULT 0",
+        "id_status": "VARCHAR(20) NOT NULL DEFAULT 'none'",
+        "id_doc_type": "VARCHAR(30) NOT NULL DEFAULT ''",
+        "id_note": "VARCHAR(300) NOT NULL DEFAULT ''",
+        "id_front_path": "VARCHAR(255)",
+        "id_selfie_path": "VARCHAR(255)",
+        "id_submitted_at": "DATETIME",
+        "id_verified_at": "DATETIME",
+        "club_read_id": "INTEGER NOT NULL DEFAULT 0",
     },
     "items": {
         "lat": "FLOAT",

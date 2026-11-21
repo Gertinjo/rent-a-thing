@@ -8,14 +8,16 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import ai, schemas, services
+from .. import ai, chat, schemas, services, verification
 from ..database import get_db
 from ..deps import require_admin
-from ..models import AdminAction, Booking, BookingStatus, ContactMessage, Item, Review, Review_, SpinFrame, User
+from ..models import AdminAction, Booking, BookingStatus, ContactMessage, IdStatus, Item, Review, Review_, SpinFrame, User
+from ..realtime import push_notification
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -72,6 +74,7 @@ class StatsOut(BaseModel):
     avg_rating: float | None
     open_messages: int
     pending_users: int
+    pending_ids: int = 0
     pending_listings: int
     bookings_per_day: list[DayCount]
     recent_actions: list[ActionOut]
@@ -94,6 +97,9 @@ class AdminUserOut(BaseModel):
     bookings_count: int
     rating_avg: float | None
     rating_count: int
+    id_status: str = "none"
+    rental_count: int = 0
+    club_member: bool = False
 
 
 class AdminUserPatch(BaseModel):
@@ -270,6 +276,7 @@ def stats(_: User = Depends(require_admin), db: Session = Depends(get_db)):
         avg_rating=round(avg, 2) if avg is not None else None,
         open_messages=count(select(func.count(ContactMessage.id)).where(ContactMessage.status == "open")),
         pending_users=count(select(func.count(User.id)).where(User.approval_status == Review_.PENDING)),
+        pending_ids=count(select(func.count(User.id)).where(User.id_status == IdStatus.PENDING)),
         pending_listings=count(select(func.count(Item.id)).where(Item.review_status == Review_.PENDING)),
         bookings_per_day=per_day,
         recent_actions=_actions(db, 8),
@@ -305,6 +312,9 @@ def _user_out(db: Session, u: User) -> AdminUserOut:
         bookings_count=db.scalar(select(func.count(Booking.id)).where(Booking.renter_id == u.id)) or 0,
         rating_avg=avg,
         rating_count=n,
+        id_status=u.id_status,
+        rental_count=u.rental_count or 0,
+        club_member=u.club_member,
     )
 
 
@@ -599,12 +609,14 @@ def update_message(
 class SettingsOut(BaseModel):
     approve_users: bool
     approve_listings: bool
+    require_id: bool
     platform_fee_percent: int
 
 
 class SettingsPatch(BaseModel):
     approve_users: bool | None = None
     approve_listings: bool | None = None
+    require_id: bool | None = None
     platform_fee_percent: int | None = None
 
 
@@ -613,6 +625,7 @@ def get_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)
     return SettingsOut(
         approve_users=services.get_setting(db, "approve_users"),
         approve_listings=services.get_setting(db, "approve_listings"),
+        require_id=services.get_setting(db, "require_id"),
         platform_fee_percent=int(services.get_setting_str(db, "platform_fee_percent")),
     )
 
@@ -629,3 +642,89 @@ def update_settings(body: SettingsPatch, admin: User = Depends(require_admin), d
             _log(db, admin, "change_setting", "setting", 0, f"{k} = {'on' if v else 'off'}")
     db.commit()
     return get_settings(admin, db)
+
+
+# ---------------------------------------------------------------------------
+# ID verification
+# ---------------------------------------------------------------------------
+
+
+class VerificationOut(BaseModel):
+    user_id: int
+    name: str
+    email: str
+    avatar_url: str | None
+    neighborhood: str
+    created_at: datetime
+    id_status: str
+    doc_type: str
+    note: str
+    submitted_at: datetime | None
+    verified_at: datetime | None
+    has_front: bool
+    has_selfie: bool
+
+
+class VerificationDecision(BaseModel):
+    decision: Literal["verified", "rejected"]
+    note: str = Field(default="", max_length=300)
+
+
+def _verification_out(u: User) -> VerificationOut:
+    return VerificationOut(
+        user_id=u.id,
+        name=u.name,
+        email=u.email,
+        avatar_url=u.avatar_url,
+        neighborhood=u.neighborhood,
+        created_at=u.created_at,
+        id_status=u.id_status,
+        doc_type=u.id_doc_type,
+        note=u.id_note,
+        submitted_at=u.id_submitted_at,
+        verified_at=u.id_verified_at,
+        has_front=verification.file_path(u, "front") is not None,
+        has_selfie=verification.file_path(u, "selfie") is not None,
+    )
+
+
+@router.get("/verifications", response_model=list[VerificationOut])
+def verifications(
+    status: Literal["pending", "verified", "rejected", "none", "all"] = "pending",
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    stmt = select(User).where(User.is_admin.is_(False))
+    if status != "all":
+        stmt = stmt.where(User.id_status == status)
+    stmt = stmt.order_by(User.id_submitted_at.desc().nullslast(), User.created_at.desc()).limit(300)
+    return [_verification_out(u) for u in db.scalars(stmt).all()]
+
+
+@router.get("/verifications/{user_id}/{which}")
+def verification_image(user_id: int, which: Literal["front", "selfie"], _: User = Depends(require_admin), db: Session = Depends(get_db)):
+    u = db.get(User, user_id)
+    path = verification.file_path(u, which) if u else None
+    if not path:
+        raise HTTPException(404, "No image")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store, private"})
+
+
+@router.post("/verifications/{user_id}", response_model=VerificationOut)
+def decide_verification(user_id: int, body: VerificationDecision, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(404, "User not found")
+    ok = body.decision == "verified"
+    verification.decide(u, ok, body.note)
+    _log(db, admin, "verify_id" if ok else "reject_id", "user", u.id, f"ID {'verified' if ok else 'rejected'}: {u.name}", body.note)
+    n = chat.notify(
+        db,
+        u.id,
+        "id_verified" if ok else "id_rejected",
+        "Your ID is verified ✓" if ok else "We couldn’t verify your ID",
+        "You can now book and list things." if ok else (u.id_note + " Please send new photos from your profile."),
+    )
+    db.commit()
+    push_notification(u.id, chat.notification_out(n))
+    return _verification_out(u)

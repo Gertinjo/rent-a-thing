@@ -157,4 +157,6 @@ def unread_counts(db: Session, user_id: int) -> dict:
     notes = db.scalar(
         select(func.count(Notification.id)).where(Notification.user_id == user_id, Notification.read.is_(False), Notification.kind != "message")
     ) or 0
-    return {"messages": msgs, "notifications": notes}
+    from . import club  # local import: club imports this module
+
+    return {"messages": msgs, "notifications": notes, "club": club.unread(db, db.get(User, user_id))}

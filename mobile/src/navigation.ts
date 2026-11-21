@@ -24,6 +24,8 @@ export type RootStackParamList = {
   Chat: { bookingId: number };
   Messages: undefined;
   Notifications: undefined;
+  Club: undefined;
+  VerifyId: undefined;
 };
 
 export type ScreenProps<T extends keyof RootStackParamList> = NativeStackScreenProps<RootStackParamList, T>;

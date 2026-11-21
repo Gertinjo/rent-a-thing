@@ -89,6 +89,8 @@ def create_item(
     data = body.model_dump(exclude={"location"})
     if not body.terms_accepted:
         raise HTTPException(400, "You must accept the rental terms before listing an item.")
+    if services.id_required(db, user):
+        raise HTTPException(403, services.ID_BLOCK_MESSAGE.get(user.id_status, services.ID_BLOCK_MESSAGE["none"]))
     data["neighborhood"] = (data.get("neighborhood") or user.neighborhood or "").strip()
     item = Item(owner_id=user.id, **data)
     _apply_location(item, body.location)

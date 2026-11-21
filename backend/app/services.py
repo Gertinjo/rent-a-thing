@@ -6,7 +6,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import schemas
-from .models import AppSetting, Blackout, Booking, BookingStatus, Item, Review, Review_, User
+from .models import CLUB_MIN_RENTALS, AppSetting, Blackout, Booking, BookingStatus, Item, Notification, Review, Review_, User
 
 # ---------- availability ----------
 
@@ -89,7 +89,14 @@ def auto_complete_finished(db: Session) -> None:
 
 # ---------- admin settings ----------
 
-DEFAULT_SETTINGS = {"approve_users": "1", "approve_listings": "1", "platform_fee_percent": "10", "club_discount_percent": "10"}
+DEFAULT_SETTINGS = {
+    "approve_users": "1",
+    "approve_listings": "1",
+    "platform_fee_percent": "10",
+    "club_discount_percent": "10",
+    # Every user must have a verified ID before they can book or list something.
+    "require_id": "1",
+}
 
 
 def get_setting(db: Session, key: str) -> bool:
@@ -123,7 +130,19 @@ def club_discount_percent(db: Session) -> float:
 
 
 def is_club_member(user: User) -> bool:
-    return user.rental_count >= 5
+    return user.club_member
+
+
+def id_required(db: Session, user: User) -> bool:
+    """True when this user still has to verify their ID before booking or listing."""
+    return get_setting(db, "require_id") and not user.is_admin and not user.id_verified
+
+
+ID_BLOCK_MESSAGE = {
+    "none": "Please verify your ID first. It takes a minute: Profile → Verify your ID.",
+    "pending": "Your ID is being checked. You can continue as soon as it’s verified (usually within a day).",
+    "rejected": "Your ID couldn’t be verified. Please send a new photo: Profile → Verify your ID.",
+}
 
 
 def apply_club_discount(subtotal: float, user: User, db: Session) -> tuple[float, float]:
@@ -135,17 +154,33 @@ def apply_club_discount(subtotal: float, user: User, db: Session) -> tuple[float
     return 0.0, subtotal
 
 
-def increment_rental_counts(db: Session) -> None:
-    """After bookings move to COMPLETED, bump each renter's rental_count."""
+def increment_rental_counts(db: Session) -> list[int]:
+    """After bookings move to COMPLETED, refresh each renter's rental_count.
+    Returns the ids of users who just joined the Rent Club (a welcome notification is stored for them)."""
+    db.flush()  # the session doesn't autoflush: make sure just-completed bookings are counted
     completed = db.execute(
         select(Booking.renter_id, func.count(Booking.id)).where(
             Booking.status == BookingStatus.COMPLETED
         ).group_by(Booking.renter_id)
     ).all()
+    joined: list[int] = []
     for renter_id, cnt in completed:
         user = db.get(User, renter_id)
         if user:
+            was_member = user.club_member
             user.rental_count = cnt
+            if user.club_member and not was_member:
+                joined.append(user.id)
+                db.add(
+                    Notification(
+                        user_id=user.id,
+                        kind="club_joined",
+                        title="Welcome to the Rent Club 🎉",
+                        body=f"{CLUB_MIN_RENTALS} rentals done! You get the club badge, "
+                        f"{get_setting_str(db, 'club_discount_percent')}% off bookings and the members’ chat.",
+                    )
+                )
+    return joined
 
 
 # ---------- location privacy ----------
@@ -210,6 +245,8 @@ def user_out(db: Session, user: User) -> schemas.UserOut:
         name=user.name,
         neighborhood=user.neighborhood,
         avatar_url=user.avatar_url,
+        club_member=user.club_member,
+        id_verified=user.id_verified,
         bio=user.bio,
         created_at=user.created_at,
         rating_avg=avg,
@@ -236,7 +273,10 @@ def me_out(db: Session, user: User) -> schemas.MeOut:
         listings_count=listings or 0,
         rentals_count=rentals or 0,
         lendings_count=lendings or 0,
-        club_member=is_club_member(user),
+        rental_count=user.rental_count or 0,
+        id_status=user.id_status,
+        id_note=user.id_note,
+        id_required=get_setting(db, "require_id") and not user.is_admin,
     )
 
 

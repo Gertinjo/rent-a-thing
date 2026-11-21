@@ -9,6 +9,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, Review } from '../api';
 import { useAuth } from '../auth';
 import AccountBanner from '../components/AccountBanner';
+import { CLUB_GOLD, UserBadges } from '../components/Badges';
+import { useRealtime } from '../realtime';
 import { Avatar, Button, Glass, ListGroup, ListRow, Stars, useTabBarSpace } from '../components/ui';
 import { APP } from '../content';
 import type { RootStackParamList } from '../navigation';
@@ -52,6 +54,7 @@ export default function ProfileScreen() {
       { text: 'Log out', style: 'destructive', onPress: signOut },
     ]);
 
+  const clubUnread = useRealtime().unread.club ?? 0;
   const modeLabel = { system: 'Automatic', light: 'Light', dark: 'Dark' }[mode];
 
   return (
@@ -67,6 +70,7 @@ export default function ProfileScreen() {
           </Glass>
         </Pressable>
         <Text style={s.name}>{user.name}</Text>
+        <UserBadges user={user} labels />
         <Text style={s.meta}>
           {[user.neighborhood, `Joined ${new Date(user.created_at).getFullYear()}`].filter(Boolean).join(' · ')}
         </Text>
@@ -123,6 +127,23 @@ export default function ProfileScreen() {
           <ListRow icon="speedometer" iconColor="#636366" label="Admin dashboard" onPress={() => nav.navigate('Admin')} />
         </ListGroup>
       )}
+
+      <ListGroup title="Trust & community">
+        <ListRow
+          icon="shield-checkmark"
+          iconColor="#2563EB"
+          label="ID verification"
+          value={{ none: 'Not verified', pending: 'Being checked', verified: 'Verified ✓', rejected: 'Try again' }[user.id_status]}
+          onPress={() => nav.navigate('VerifyId')}
+        />
+        <ListRow
+          icon="ribbon"
+          iconColor={CLUB_GOLD}
+          label="Rent Club"
+          value={user.club_member ? (clubUnread ? `${clubUnread} new` : 'Member') : `${Math.min(user.rental_count, 5)}/5 rentals`}
+          onPress={() => nav.navigate('Club')}
+        />
+      </ListGroup>
 
       <ListGroup title="Account">
         <ListRow icon="person" label="Edit profile" onPress={() => nav.navigate('EditProfile')} />

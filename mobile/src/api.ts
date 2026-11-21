@@ -50,6 +50,9 @@ export interface UserBrief {
   name: string;
   neighborhood: string;
   avatar_url: string | null;
+  /** public badges */
+  club_member?: boolean;
+  id_verified?: boolean;
 }
 export interface User extends UserBrief {
   bio: string;
@@ -65,6 +68,38 @@ export interface Me extends User {
   listings_count: number;
   rentals_count: number;
   lendings_count: number;
+  club_member: boolean;
+  rental_count: number;
+  id_status: IdStatus;
+  id_note: string;
+  /** true when the app requires an ID check for this account */
+  id_required: boolean;
+}
+export type IdStatus = 'none' | 'pending' | 'verified' | 'rejected';
+export type IdDocType = 'id_card' | 'passport' | 'driving_licence';
+export interface Verification {
+  status: IdStatus;
+  doc_type: IdDocType | '';
+  note: string;
+  submitted_at: string | null;
+  verified_at: string | null;
+  required: boolean;
+}
+export interface ClubInfo {
+  is_member: boolean;
+  can_chat: boolean;
+  rentals: number;
+  needed: number;
+  discount_percent: number;
+  member_count: number;
+  members: { id: number; name: string; avatar_url: string | null; rentals: number }[];
+  unread: number;
+}
+export interface ClubMessage {
+  id: number;
+  body: string;
+  created_at: string;
+  sender: { id: number; name: string; avatar_url: string | null; is_admin: boolean; id_verified: boolean };
 }
 export type ContactTopic = 'general' | 'booking' | 'safety' | 'bug' | 'feedback';
 export interface Photo {
@@ -200,6 +235,7 @@ export interface AppNotification {
 export interface Unread {
   messages: number;
   notifications: number;
+  club?: number;
 }
 export interface LocalFile {
   uri: string;
@@ -351,6 +387,20 @@ export const api = {
   notifications: () => request<{ items: AppNotification[] } & Unread>('GET', '/notifications'),
   readNotifications: () => request<Unread>('POST', '/notifications/read'),
   unread: () => request<Unread>('GET', '/me/unread'),
+
+  // ----- Rent Club + ID verification -----
+  club: () => request<ClubInfo>('GET', '/club'),
+  clubMessages: () => request<ClubMessage[]>('GET', '/club/messages'),
+  clubSend: (body: string) => request<ClubMessage>('POST', '/club/messages', { body }),
+  clubRead: () => request<Unread>('POST', '/club/read'),
+  verification: () => request<Verification>('GET', '/me/verification'),
+  submitVerification: async (docType: IdDocType, front: LocalFile, selfie: LocalFile) => {
+    const fd = new FormData();
+    fd.append('doc_type', docType);
+    await appendFile(fd, 'front', front, 'id-front.jpg', 'image/jpeg');
+    await appendFile(fd, 'selfie', selfie, 'selfie.jpg', 'image/jpeg');
+    return request<Verification>('POST', '/me/verification', fd, 120000);
+  },
 };
 
 // ---------- admin (mirror backend/app/routers/admin.py) ----------

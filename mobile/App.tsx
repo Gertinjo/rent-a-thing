@@ -14,6 +14,8 @@ import { AdminApprovalsScreen, AdminHomeScreen, AdminInboxScreen } from './src/s
 import { LoginScreen, RegisterScreen } from './src/screens/AuthScreens';
 import BookingsScreen from './src/screens/BookingsScreen';
 import ChatScreen from './src/screens/ChatScreen';
+import ClubScreen from './src/screens/ClubScreen';
+import VerifyIdScreen from './src/screens/VerifyIdScreen';
 import { MessagesScreen, NotificationsScreen } from './src/screens/InboxScreens';
 import ExploreScreen from './src/screens/ExploreScreen';
 import ItemDetailScreen from './src/screens/ItemDetailScreen';
@@ -47,12 +49,14 @@ const Tab = createBottomTabNavigator();
 function Tabs() {
   const { unread } = useRealtime();
   const badge = unread.messages > 0 ? (unread.messages > 9 ? '9+' : unread.messages) : undefined;
+  const club = unread.club ?? 0;
+  const profileBadge = club > 0 ? (club > 9 ? '9+' : club) : undefined;
   return (
     <Tab.Navigator tabBar={(props) => <GlassTabBar {...props} />} screenOptions={{ headerShown: false }}>
       <Tab.Screen name="Explore" component={ExploreScreen} />
       <Tab.Screen name="Bookings" component={BookingsScreen} options={{ tabBarBadge: badge }} />
       <Tab.Screen name="My things" component={MyListingsScreen} />
-      <Tab.Screen name="Profile" component={ProfileScreen} />
+      <Tab.Screen name="Profile" component={ProfileScreen} options={{ tabBarBadge: profileBadge }} />
     </Tab.Navigator>
   );
 }
@@ -79,6 +83,8 @@ function Root() {
           <Stack.Screen name="Chat" component={ChatScreen} />
           <Stack.Screen name="Messages" component={MessagesScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
+          <Stack.Screen name="Club" component={ClubScreen} />
+          <Stack.Screen name="VerifyId" component={VerifyIdScreen} />
           <Stack.Screen name="EditProfile" component={EditProfileScreen} />
           <Stack.Screen name="Appearance" component={AppearanceScreen} />
           <Stack.Screen name="Contact" component={ContactScreen} />

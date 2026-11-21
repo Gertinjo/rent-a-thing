@@ -9,6 +9,7 @@ import { Avatar, Button, Empty, LargeHeader, Segmented, StatusDot, useTabBarSpac
 import type { RootStackParamList } from '../navigation';
 import { Alert } from '../platform';
 import { useRealtime } from '../realtime';
+import { UserBadges } from '../components/Badges';
 import { fmtRange, isoDay, makeStyles, money, statusStyle, type, useTheme } from '../theme';
 
 type Tab = 'renter' | 'owner';
@@ -135,6 +136,7 @@ export default function BookingsScreen() {
                 {b.role === 'owner' ? `${other.name} wants to borrow it` : `From ${other.name}`}
                 {other.rating_count ? ` · ★ ${other.rating_avg?.toFixed(1)}` : ''}
               </Text>
+              <UserBadges user={other} small />
               {b.status !== 'declined' && b.status !== 'cancelled' && (
                 <Pressable onPress={() => nav.navigate('Chat', { bookingId: b.id })} style={s.chatBtn} hitSlop={6} accessibilityLabel={`Message ${first}`}>
                   <Ionicons name="chatbubble-ellipses" size={15} color={c.accent} />

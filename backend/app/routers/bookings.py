@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import chat, schemas, services
 from ..database import get_db
 from ..deps import get_current_user
-from ..models import Booking, BookingStatus, Item, Review, User
+from ..models import Booking, BookingStatus, Item, Notification, Review, User
 from ..realtime import push_notification
 
 router = APIRouter(tags=["bookings & reviews"])
@@ -48,6 +48,8 @@ def request_booking(
             if user.approval_status == "pending"
             else "Your account wasn’t approved, so you can’t book yet. Contact support for help.",
         )
+    if services.id_required(db, user):
+        raise HTTPException(403, services.ID_BLOCK_MESSAGE.get(user.id_status, services.ID_BLOCK_MESSAGE["none"]))
     if item.owner_id == user.id:
         raise HTTPException(400, "You can't rent your own item")
     if body.start_date < date.today():
@@ -188,8 +190,12 @@ def complete(booking_id: int, user: User = Depends(get_current_user), db: Sessio
     if b.start_date > date.today():
         raise HTTPException(400, "The rental hasn't started yet")
     b.status = BookingStatus.COMPLETED
-    services.increment_rental_counts(db)
+    joined = services.increment_rental_counts(db)
     db.commit()
+    if b.renter_id in joined:  # the welcome note was stored by increment_rental_counts; push it live
+        n = db.scalar(select(Notification).where(Notification.user_id == b.renter_id).order_by(Notification.id.desc()))
+        if n:
+            push_notification(b.renter_id, chat.notification_out(n))
     _tell(db, b.renter_id, "booking_completed", "Rental finished — how did it go?", f"Leave a review for {_first(user.name)} · {b.item.title}", b)
     return services.booking_out(db, b, user)
 

@@ -7,7 +7,7 @@ const $app = document.getElementById('app');
 
 let token = localStorage.getItem(TOKEN_KEY);
 let me = null;
-let counts = { approvals: 0, users: 0, listings: 0, messages: 0 };
+let counts = { approvals: 0, users: 0, listings: 0, messages: 0, ids: 0 };
 let aiOn = false; // set from /ai/status at boot
 const state = {
   approvals: { tab: 'listings', selected: new Set() },
@@ -16,6 +16,7 @@ const state = {
   bookings: { q: '', status: 'all' },
   reviews: { filter: 'all' },
   support: { status: 'open', selected: null },
+  ids: { status: 'pending' },
 };
 const cache = {}; // last loaded rows per page, for drawers
 
@@ -204,6 +205,7 @@ async function login(email, password) {
 const PAGES = [
   ['overview', 'Overview', 'grid'],
   ['approvals', 'Approvals', 'check'],
+  ['ids', 'ID checks', 'shield'],
   ['users', 'Users', 'users'],
   ['listings', 'Listings', 'box'],
   ['bookings', 'Bookings', 'calendar'],
@@ -217,7 +219,7 @@ const route = () => (location.hash.replace('#/', '') || 'overview').split('?')[0
 function shell() {
   const r = route();
   const badge = (id) =>
-    id === 'approvals' && counts.approvals ? `<span class="count">${counts.approvals}</span>` : id === 'support' && counts.messages ? `<span class="count">${counts.messages}</span>` : '';
+    id === 'approvals' && counts.approvals ? `<span class="count">${counts.approvals}</span>` : id === 'ids' && counts.ids ? `<span class="count">${counts.ids}</span>` : id === 'support' && counts.messages ? `<span class="count">${counts.messages}</span>` : '';
   $app.innerHTML = `
     <div class="shell">
       <aside class="side">
@@ -261,12 +263,12 @@ const kv = (rows) => `<div class="kv">${rows.filter(Boolean).map(([k, v]) => `<d
 async function refreshCounts() {
   try {
     const s = await api('GET', '/admin/stats');
-    counts = { approvals: s.pending_users + s.pending_listings, users: s.pending_users, listings: s.pending_listings, messages: s.open_messages };
+    counts = { approvals: s.pending_users + s.pending_listings, users: s.pending_users, listings: s.pending_listings, messages: s.open_messages, ids: s.pending_ids || 0 };
     document.querySelectorAll('.nav').forEach((a) => {
       const id = a.getAttribute('href')?.replace('#/', '');
       const old = a.querySelector('.count');
       old?.remove();
-      const n = id === 'approvals' ? counts.approvals : id === 'support' ? counts.messages : 0;
+      const n = id === 'approvals' ? counts.approvals : id === 'support' ? counts.messages : id === 'ids' ? counts.ids : 0;
       if (n) a.insertAdjacentHTML('beforeend', `<span class="count">${n}</span>`);
     });
     return s;
@@ -484,6 +486,23 @@ const VIEWS = {
             <td>${esc(a.summary)}</td><td class="muted">${esc(a.reason) || '—'}</td><td>${esc(a.admin_name)}</td><td class="tiny">${ago(a.created_at)}</td></tr>`; }).join('')}</tbody></table>` : '<div class="empty"><b>No actions yet</b></div>'}</div>`;
   },
 
+  async ids() {
+    const st = state.ids.status;
+    const rows = await api('GET', `/admin/verifications?status=${st}`);
+    cache.ids = Object.fromEntries(rows.map((r) => [r.user_id, r]));
+    const DOC = { id_card: 'ID card', passport: 'Passport', driving_licence: 'Driving licence' };
+    const STATUS = { none: ['Not submitted', ''], pending: ['Waiting', 'amber'], verified: ['Verified', 'green'], rejected: ['Rejected', 'red'] };
+    const list = rows.length
+      ? `<table><thead><tr><th>Person</th><th>Document</th><th>Status</th><th>Sent</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr data-act="id-open" data-id="${r.user_id}"><td><div class="cell">${avatar(r.name, r.avatar_url)}<div><b>${esc(r.name)}</b><div class="tiny">${esc(r.email)}</div></div></div></td>
+          <td>${esc(DOC[r.doc_type] || '—')}</td><td>${pill(STATUS[r.id_status] || [r.id_status, ''])}</td>
+          <td class="tiny">${r.submitted_at ? ago(r.submitted_at) : '—'}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty"><b>${st === 'pending' ? 'No ID checks waiting' : 'Nobody here'}</b>${st === 'pending' ? 'New submissions show up here.' : ''}</div>`;
+    return `${header('ID checks', 'Compare the document photo with the selfie. Photos are private and deleted as soon as you decide.')}
+      ${tabs('ids.status', [['pending', 'Waiting', counts.ids], ['none', 'Not submitted'], ['rejected', 'Rejected'], ['verified', 'Verified']], st)}
+      <div class="card">${list}</div>`;
+  },
+
   async settings() {
     const s = await api('GET', '/admin/settings');
     const sw = (key, title, text) => `<div class="setting"><div class="txt"><b>${title}</b><span class="muted">${text}</span></div>
@@ -491,6 +510,7 @@ const VIEWS = {
     return `${header('Settings')}
       <div class="card" style="max-width:760px">
         ${sw('approve_users', 'Approve new users', 'New sign-ups can browse but can’t book until an admin approves them.')}
+        ${sw('require_id', 'Require ID verification', 'Every user must upload an ID document and a selfie, checked by an admin under “ID checks”, before they can book or list. Admins are exempt.')}
         ${sw('approve_listings', 'Approve new listings', 'New listings stay hidden from Explore until an admin approves them. Edited rejected listings come back for review.')}
         <div class="setting">
           <div class="txt"><b>Platform fee</b><span class="muted">Kept by Rent a Thing on each booking, % of what the renter pays</span></div>
@@ -515,6 +535,44 @@ function feed(actions) {
 // ---------------------------------------------------------------------------
 // drawers
 // ---------------------------------------------------------------------------
+
+/** ID photos need the admin token, so they're fetched and shown as blob: URLs (allowed by the CSP). */
+async function privateImage(path, imgId) {
+  try {
+    const res = await fetch(API + path, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+    if (!res.ok) throw new Error();
+    const url = URL.createObjectURL(await res.blob());
+    const img = document.getElementById(imgId);
+    if (img) {
+      img.src = url;
+      img.onload = () => URL.revokeObjectURL(url);
+    }
+  } catch {
+    const img = document.getElementById(imgId);
+    if (img) img.replaceWith(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Image not available' }));
+  }
+}
+
+function idDrawer(r) {
+  const DOC = { id_card: 'ID card', passport: 'Passport', driving_licence: 'Driving licence' };
+  const photos = r.has_front || r.has_selfie;
+  openDrawer(`ID check · ${r.name}`, `
+    ${kv([['Email', esc(r.email)], ['Area', esc(r.neighborhood) || '—'], ['Joined', fmtDate(r.created_at)], ['Document', esc(DOC[r.doc_type] || '—')],
+      ['Status', esc(r.id_status)], r.submitted_at && ['Sent', ago(r.submitted_at)], r.note && ['Note', esc(r.note)]])}
+    ${photos ? `<div class="idpair">
+        <figure><img id="id-front" alt="ID document"><figcaption>Document</figcaption></figure>
+        <figure><img id="id-selfie" alt="Selfie"><figcaption>Selfie</figcaption></figure>
+      </div>
+      <p class="tiny">Check: same face, name matches the profile, document not expired or edited.</p>`
+      : `<p class="muted">${r.id_status === 'verified' ? 'Verified. The photos were deleted after the check.' : 'No photos on file.'} You can still verify someone you checked in person.</p>`}
+    ${r.id_status !== 'verified' ? `${reasonBox('If rejecting: what should they fix? (shown to the person)')}
+      <div class="row" style="gap:8px;margin-top:10px">
+        <button class="btn good" data-act="id-decide" data-decision="verified" data-id="${r.user_id}">${icon('check')} Verify</button>
+        <button class="btn bad" data-act="id-decide" data-decision="rejected" data-id="${r.user_id}">Reject</button>
+      </div>` : `<button class="btn bad" data-act="id-decide" data-decision="rejected" data-id="${r.user_id}" style="margin-top:10px">Revoke verification</button>${reasonBox('Why? (shown to the person)')}`}`);
+  if (r.has_front) privateImage(`/admin/verifications/${r.user_id}/front`, 'id-front');
+  if (r.has_selfie) privateImage(`/admin/verifications/${r.user_id}/selfie`, 'id-selfie');
+}
 
 function userDrawer(u) {
   const self = u.id === me.id;
@@ -617,6 +675,22 @@ const ACT = {
     render();
   },
   user: (el) => cache.users?.[el.dataset.id] && userDrawer(cache.users[el.dataset.id]),
+  'id-open': (el) => cache.ids?.[el.dataset.id] && idDrawer(cache.ids[el.dataset.id]),
+  'id-decide': async (el) => {
+    const note = reasonValue();
+    if (el.dataset.decision === 'rejected' && !note) return toast('Write what was wrong, so the person can fix it');
+    el.disabled = true;
+    try {
+      await api('POST', `/admin/verifications/${el.dataset.id}`, { decision: el.dataset.decision, note });
+      closeDrawer();
+      toast(el.dataset.decision === 'verified' ? 'ID verified' : 'ID rejected');
+      await refreshCounts();
+      render();
+    } catch (err) {
+      toast(err.message);
+      el.disabled = false;
+    }
+  },
   item: (el) => cache.items?.[el.dataset.id] && itemDrawer(cache.items[el.dataset.id]),
   booking: (el) => bookingDrawer(cache.bookings[el.dataset.id]),
   review: (el) => reviewDrawer(cache.reviews[el.dataset.id]),

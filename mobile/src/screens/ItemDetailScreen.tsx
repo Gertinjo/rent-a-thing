@@ -33,6 +33,7 @@ import {
   SectionTitle,
   Stars,
 } from '../components/ui';
+import { UserBadges } from '../components/Badges';
 import type { ScreenProps } from '../navigation';
 import { Alert } from '../platform';
 import { categoryLabel, daysBetween, fmtDate, fmtRange, makeStyles, money, type, useTheme } from '../theme';
@@ -192,7 +193,10 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
           <View style={s.owner}>
             <Avatar name={item.owner.name} url={item.owner.avatar_url} size={48} />
             <View style={{ flex: 1, gap: 2 }}>
-              <Text style={s.ownerName}>{isOwner ? 'You’re lending this' : `Lent by ${item.owner.name.split(' ')[0]}`}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <Text style={s.ownerName}>{isOwner ? 'You’re lending this' : `Lent by ${item.owner.name.split(' ')[0]}`}</Text>
+                <UserBadges user={item.owner} small />
+              </View>
               <Text style={s.meta}>
                 {item.owner.rating_count ? `★ ${item.owner.rating_avg?.toFixed(1)} · ${item.owner.rating_count} review${item.owner.rating_count === 1 ? '' : 's'}` : 'New lender'} ·{' '}
                 {item.owner.neighborhood}
@@ -343,6 +347,8 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
             </View>
             {isOwner ? (
               <Button title="Block" icon="lock-closed" onPress={blockDates} disabled={!sel.start} loading={busy} />
+            ) : user?.id_required && user.id_status !== 'verified' ? (
+              <Button title={user.id_status === 'pending' ? 'ID being checked' : 'Verify ID'} icon="shield-checkmark" onPress={() => navigation.navigate('VerifyId')} disabled={user.id_status === 'pending'} />
             ) : (
               <Button title="Request" onPress={() => setAskOpen(true)} disabled={!sel.start || !item.is_active} />
             )}

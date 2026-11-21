@@ -9,7 +9,7 @@ RUN npx expo export --platform web
 # ---- 2. API + web app in one small image ----
 FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    DATABASE_URL=sqlite:////data/rentathing.db MEDIA_DIR=/data/media
+    DATABASE_URL=sqlite:////data/rentathing.db MEDIA_DIR=/data/media PRIVATE_DIR=/data/private
 WORKDIR /app/backend
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

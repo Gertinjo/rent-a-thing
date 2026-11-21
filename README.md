@@ -94,6 +94,11 @@ Sports · Kids & baby · Home & cleaning · Music · Travel · Other
 - **Diagrams.** Stack, booking workflow, chat sequence, CI/CD and data model are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **CI/CD.** `.github/workflows/ci.yml` runs pytest + pip-audit, tsc + the web build, and a Docker build. On `main` it pushes the image to GHCR. Run the image locally with `docker build -t rentathing . && docker run -p 8000:8000 -e SECRET_KEY=change-me -v rat-data:/data rentathing`.
 
+## Rent Club and ID verification
+
+- **Rent Club.** After 5 completed rentals you get a gold **Rent Club** badge (on your profile, listings, bookings and chats), the club discount and the **members' group chat**, which is live over Socket.IO. Find it under Profile → Rent Club; non-members see their progress there. Admins can read and post as moderators.
+- **ID verification.** Every user uploads a photo of an ID card, passport or driving licence plus a selfie (Profile → ID verification). Booking and listing stay locked until an admin approves the ID in the desktop admin under **ID checks**. The photos are re-encoded, stored outside `/media` in `backend/private/` (git-ignored), viewable only by admins, and deleted as soon as an admin decides. Verified users get a blue shield badge. Admins can switch the requirement off under Settings → *Require ID verification*.
+
 ## Run it
 
 ### 1. Backend

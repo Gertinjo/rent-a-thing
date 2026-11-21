@@ -13,3 +13,5 @@ design-archive
 .git
 .github
 **/.DS_Store
+backend/private
+backend/backups

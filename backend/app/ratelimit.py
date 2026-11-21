@@ -48,6 +48,7 @@ RULES = [
     ("*", "/geo/", 30, 60, "geo"),
     ("POST", "/bookings", 30, 60, "bookings-write"),
     ("POST", "/support/contact", 5, 600, "contact"),
+    ("POST", "/me/verification", 5, 3600, "id-upload"),
 ]
 GLOBAL = (300, 60)  # every other API request
 # Static files and the websocket are not limited here.

@@ -8,11 +8,15 @@ Server -> client events
   notification  {notification}                  something happened (new request, accepted, ...)
   typing        {booking_id, user_id}           the other person is typing
   read          {booking_id, user_id}           the other person read your messages
-  unread        {messages, notifications}       fresh badge counts
+  unread        {messages, notifications, club} fresh badge counts
+  club_message  {message}                       new Rent Club group message (room "club")
 Client -> server events (with acknowledgement)
   send_message  {booking_id, body}   -> {ok, message} | {ok: false, error}
   typing        {booking_id}
   read          {booking_id}         -> {ok}
+  club_join     {}                   -> {ok}    join the club room (members/admins)
+  club_send     {body}               -> {ok, message} | {ok: false, error}
+  club_read     {}
 """
 
 import functools
@@ -21,7 +25,7 @@ import logging
 import anyio
 import socketio
 
-from . import chat
+from . import chat, club
 from .database import SessionLocal
 from .models import User
 from .ratelimit import chat_allowed
@@ -51,6 +55,13 @@ def emit_to_user(user_id: int, event: str, data: dict) -> None:
         log.debug("live emit skipped", exc_info=True)
 
 
+def emit_to_room(room_name: str, event: str, data: dict) -> None:
+    try:
+        anyio.from_thread.run(functools.partial(sio.emit, event, data, room=room_name))
+    except Exception:
+        log.debug("live emit skipped", exc_info=True)
+
+
 def push_notification(user_id: int, notification: dict) -> None:
     emit_to_user(user_id, "notification", {"notification": notification})
     with SessionLocal() as db:
@@ -62,22 +73,26 @@ def push_notification(user_id: int, notification: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _authenticate(token: str | None) -> int | None:
+def _authenticate(token: str | None) -> tuple[int, bool] | None:
+    """(user_id, may use the club chat) or None."""
     uid = decode_token(token) if token else None
     if not uid:
         return None
     with SessionLocal() as db:
         u = db.get(User, uid)
-        return uid if u and not u.is_suspended else None
+        return (uid, club.can_access(u)) if u and not u.is_suspended else None
 
 
 @sio.event
 async def connect(sid, environ, auth):
-    uid = await anyio.to_thread.run_sync(_authenticate, (auth or {}).get("token"))
-    if not uid:
+    who = await anyio.to_thread.run_sync(_authenticate, (auth or {}).get("token"))
+    if not who:
         raise socketio.exceptions.ConnectionRefusedError("unauthorized")
+    uid, in_club = who
     await sio.save_session(sid, {"user_id": uid})
     await sio.enter_room(sid, room(uid))
+    if in_club:
+        await sio.enter_room(sid, club.ROOM)
     counts = await anyio.to_thread.run_sync(lambda: _with_db(chat.unread_counts, uid))
     await sio.emit("unread", counts, to=sid)
 
@@ -148,3 +163,53 @@ async def read(sid, data):
     counts = await anyio.to_thread.run_sync(lambda: _with_db(chat.unread_counts, uid))
     await sio.emit("unread", counts, room=room(uid))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Rent Club group chat
+# ---------------------------------------------------------------------------
+
+
+def _club_ok(uid: int) -> bool:
+    with SessionLocal() as db:
+        return club.can_access(db.get(User, uid))
+
+
+@sio.event
+async def club_join(sid, data=None):
+    """Someone who just became a member joins the room without reconnecting."""
+    uid = await _user(sid)
+    if not uid or not await anyio.to_thread.run_sync(_club_ok, uid):
+        return {"ok": False}
+    await sio.enter_room(sid, club.ROOM)
+    return {"ok": True}
+
+
+@sio.event
+async def club_send(sid, data):
+    uid = await _user(sid)
+    if not uid:
+        return {"ok": False, "error": "Not logged in"}
+    if not chat_allowed(uid):
+        return {"ok": False, "error": "You’re sending messages too fast. Wait a few seconds."}
+    body = str((data or {}).get("body", ""))
+    try:
+        message = await anyio.to_thread.run_sync(lambda: _with_db(club.send, uid, body))
+    except chat.ChatError as e:
+        return {"ok": False, "error": e.detail}
+    await sio.enter_room(sid, club.ROOM)
+    await sio.emit("club_message", {"message": message}, room=club.ROOM)
+    return {"ok": True, "message": message}
+
+
+@sio.event
+async def club_read(sid, data=None):
+    uid = await _user(sid)
+    if not uid:
+        return
+    try:
+        await anyio.to_thread.run_sync(lambda: _with_db(club.mark_read, uid))
+    except chat.ChatError:
+        return
+    counts = await anyio.to_thread.run_sync(lambda: _with_db(chat.unread_counts, uid))
+    await sio.emit("unread", counts, room=room(uid))

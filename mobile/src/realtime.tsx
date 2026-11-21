@@ -4,7 +4,7 @@ import { Animated, Pressable, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { io, Socket } from 'socket.io-client';
 
-import { API_URL, api, AppNotification, ChatMessage, getToken, Unread } from './api';
+import { API_URL, api, AppNotification, ChatMessage, ClubMessage, getToken, Unread } from './api';
 import { useAuth } from './auth';
 import { Glass } from './components/ui';
 import { navigationRef } from './navigation';
@@ -23,6 +23,12 @@ interface Realtime {
   /** The chat currently on screen (no pop-up banner for it). */
   setActiveChat: (bookingId: number | null) => void;
   refreshUnread: () => void;
+  /** Rent Club group chat */
+  clubSend: (body: string) => Promise<ClubMessage>;
+  clubJoin: () => void;
+  clubRead: () => void;
+  /** true while the club chat is on screen (no badge bump for new messages) */
+  setClubOpen: (open: boolean) => void;
 }
 
 const Ctx = createContext<Realtime>(null as unknown as Realtime);
@@ -37,8 +43,9 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const socketRef = useRef<Socket | null>(null);
   const listeners = useRef(new Map<string, Set<Handler>>());
   const activeChat = useRef<number | null>(null);
+  const clubOpen = useRef(false);
   const [connected, setConnected] = useState(false);
-  const [unread, setUnread] = useState<Unread>({ messages: 0, notifications: 0 });
+  const [unread, setUnread] = useState<Unread>({ messages: 0, notifications: 0, club: 0 });
   const [toast, setToast] = useState<AppNotification | null>(null);
 
   const dispatch = (event: string, data: unknown) => listeners.current.get(event)?.forEach((h) => h(data));
@@ -56,7 +63,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     socketRef.current = socket;
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
-    socket.on('unread', (u: Unread) => setUnread((prev) => (prev.messages === u.messages && prev.notifications === u.notifications ? prev : u)));
+    socket.on('unread', (u: Unread) =>
+      setUnread((prev) => (prev.messages === u.messages && prev.notifications === u.notifications && prev.club === u.club ? prev : u)),
+    );
+    socket.on('club_message', (d: { message: ClubMessage }) => {
+      dispatch('club_message', d.message);
+      if (d.message.sender.id !== user.id && !clubOpen.current) setUnread((prev) => ({ ...prev, club: (prev.club ?? 0) + 1 }));
+    });
     for (const ev of ['message', 'typing', 'read']) socket.on(ev, (d) => dispatch(ev, d));
     socket.on('notification', ({ notification }: { notification: AppNotification }) => {
       dispatch('notification', notification);
@@ -103,9 +116,31 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     activeChat.current = id;
   }, []);
 
+  const clubSend = useCallback(async (body: string): Promise<ClubMessage> => {
+    const socket = socketRef.current;
+    if (socket?.connected) {
+      const ack: { ok: boolean; message?: ClubMessage; error?: string } = await socket.timeout(10000).emitWithAck('club_send', { body });
+      if (!ack.ok) throw new Error(ack.error || 'Couldn’t send');
+      return ack.message!;
+    }
+    return api.clubSend(body);
+  }, []);
+  const clubJoin = useCallback(() => {
+    socketRef.current?.emit('club_join', {});
+  }, []);
+  const clubRead = useCallback(() => {
+    setUnread((prev) => (prev.club ? { ...prev, club: 0 } : prev));
+    const socket = socketRef.current;
+    if (socket?.connected) socket.emit('club_read', {});
+    else api.clubRead().catch(() => {});
+  }, []);
+  const setClubOpen = useCallback((open: boolean) => {
+    clubOpen.current = open;
+  }, []);
+
   const value = useMemo(
-    () => ({ connected, unread, on, sendMessage, typing, markRead, setActiveChat, refreshUnread }),
-    [connected, unread, on, sendMessage, typing, markRead, setActiveChat, refreshUnread],
+    () => ({ connected, unread, on, sendMessage, typing, markRead, setActiveChat, refreshUnread, clubSend, clubJoin, clubRead, setClubOpen }),
+    [connected, unread, on, sendMessage, typing, markRead, setActiveChat, refreshUnread, clubSend, clubJoin, clubRead, setClubOpen],
   );
   const hideToast = useCallback(() => setToast(null), []);
   return (
@@ -124,6 +159,9 @@ const KIND_ICON: Record<string, string> = {
   booking_cancelled: 'close-circle',
   booking_completed: 'flag',
   review: 'star',
+  club_joined: 'ribbon',
+  id_verified: 'shield-checkmark',
+  id_rejected: 'alert-circle',
 };
 
 /** Glass banner that slides in from the top for ~4 seconds. Tap to open the chat / booking. */
@@ -146,7 +184,9 @@ function LiveToast({ notification, onDone }: { notification: AppNotification | n
   const open = () => {
     Animated.timing(y, { toValue: -160, duration: 180, useNativeDriver: true }).start(() => onDone());
     if (!navigationRef.isReady()) return;
-    if (shown.booking_id) navigationRef.navigate('Chat', { bookingId: shown.booking_id });
+    if (shown.kind === 'club_joined') navigationRef.navigate('Club');
+    else if (shown.kind.startsWith('id_')) navigationRef.navigate('VerifyId');
+    else if (shown.booking_id) navigationRef.navigate('Chat', { bookingId: shown.booking_id });
     else navigationRef.navigate('Notifications');
   };
 

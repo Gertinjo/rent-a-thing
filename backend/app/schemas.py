@@ -36,6 +36,9 @@ class UserBrief(ORM):
     name: str
     neighborhood: str
     avatar_url: str | None = None
+    # public badges
+    club_member: bool = False
+    id_verified: bool = False
 
 
 class UserOut(UserBrief):
@@ -53,7 +56,10 @@ class MeOut(UserOut):
     listings_count: int = 0
     rentals_count: int = 0  # things I rented (completed)
     lendings_count: int = 0  # times my things were rented (completed)
-    club_member: bool = False
+    rental_count: int = 0  # completed rentals counted towards the Rent Club
+    id_status: str = "none"  # none | pending | verified | rejected
+    id_note: str = ""
+    id_required: bool = True
 
 
 class PasswordChange(BaseModel):

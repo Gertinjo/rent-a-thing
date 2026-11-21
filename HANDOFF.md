@@ -78,6 +78,14 @@ handles availability calendars + booking requests; reviews after each rental. Ex
 - Previous designs: `design-archive/ios-glass-2026-11-21/` and `design-archive/explore-v2-2026-11-21/`.
 - Test listings without photos and duplicate Canon listings were deleted on request (DB backup kept in scratchpad).
 
+## Rent Club + ID verification (2026-11-21, latest)
+- Club: `app/club.py`, routes in `app/routers/club_routes.py` (`/club`, `/club/messages`, `/club/read`), Socket.IO events `club_join`/`club_send`/`club_read` → `club_message` in room "club". Threshold `CLUB_MIN_RENTALS = 5` in models.py. A `club_joined` notification is sent on joining.
+- ID: `app/verification.py`, `/me/verification` (multipart: doc_type, front, selfie), admin `/admin/verifications` (+ image endpoints and a decide endpoint). Files live in `PRIVATE_DIR` (backend/private, or /data/private in Docker) and are deleted on decision. Setting `require_id` (default on) blocks `POST /bookings` and `POST /items` for unverified non-admins.
+- App: `components/Badges.tsx`, `screens/ClubScreen.tsx`, `screens/VerifyIdScreen.tsx`; AccountBanner shows the ID call to action; ItemDetail swaps "Request" for "Verify ID"; Profile has a "Trust & community" group; the Profile tab badge shows unread club messages.
+- Fixed: rental_count lagged one booking behind (the session has no autoflush), so membership started one rental late.
+- DB backup taken before the new columns: `backend/backups/rentathing-before-club-id-*.db`.
+- Existing users (demo, bob, ...) now have to verify their ID, or an admin can verify them under ID checks.
+
 ## Chat, notifications, security, CI/CD (2026-11-21, latest)
 - Backend: `app/chat.py` (logic), `app/realtime.py` (Socket.IO at /ws/socket.io, JWT in the handshake, rooms `user:<id>`), `app/routers/chat_routes.py` (REST + fallback), new tables `messages` and `notifications`. Booking events notify through `_tell()` in `routers/bookings.py`.
 - App: `src/realtime.tsx` (RealtimeProvider + LiveToast banner, wired in App.tsx), `screens/ChatScreen.tsx`, `screens/InboxScreens.tsx` (Messages, Notifications), Message buttons on Bookings, 💬/🔔 badges on Explore, and a Bookings tab badge.

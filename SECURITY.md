@@ -21,6 +21,9 @@ Report a problem privately to the team rather than in a public issue.
 | 11 | **Exact home address exposure** | Stalking or theft risk | Public listings show only an approximate spot (snapped to a ~500 m grid). The exact pin is shown only to the renter of a confirmed booking. | `app/services.py` |
 | 12 | **AI keys** | Leaking paid keys | Keys live only in `backend/.env` (git-ignored). The AI is optional, and the app works with `AI_DISABLED=1`. | `app/ai.py` |
 
+| 13 | **Identity documents** (new feature) | ID photos are highly sensitive | They're stored outside the public `/media` folder, fetched only by admins with their token (sent `no-store`), re-encoded to strip EXIF/GPS, and deleted once the check is done. Uploads are limited to 5 per hour. | `app/verification.py` |
+| 14 | **Club chat access** | Non-members reading the group chat | Server checks membership (or admin) on every read and send, over both HTTP and the socket | `app/club.py` |
+
 ### Rate limits (per IP, or per user for chat)
 
 | Endpoint | Limit |

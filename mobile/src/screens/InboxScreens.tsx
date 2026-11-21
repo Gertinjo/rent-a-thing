@@ -26,6 +26,9 @@ const KIND_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
   booking_cancelled: 'close-circle',
   booking_completed: 'flag',
   review: 'star',
+  club_joined: 'ribbon',
+  id_verified: 'shield-checkmark',
+  id_rejected: 'alert-circle',
 };
 
 /* ------------------------------------------------------------------ Messages */
@@ -135,7 +138,9 @@ export function NotificationsScreen({ navigation }: ScreenProps<'Notifications'>
   useEffect(() => on('notification', (n: AppNotification) => setItems((prev) => [n, ...prev.filter((x) => x.id !== n.id)])), [on]);
 
   const open = (n: AppNotification) => {
-    if (n.booking_id && n.kind === 'message') navigation.navigate('Chat', { bookingId: n.booking_id });
+    if (n.kind === 'club_joined') navigation.navigate('Club');
+    else if (n.kind.startsWith('id_')) navigation.navigate('VerifyId');
+    else if (n.booking_id && n.kind === 'message') navigation.navigate('Chat', { bookingId: n.booking_id });
     else if (n.booking_id) navigation.navigate('Tabs', { screen: 'Bookings' } as never);
     else if (n.item_id) navigation.navigate('ItemDetail', { id: n.item_id });
   };

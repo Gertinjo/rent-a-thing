@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from .database import BASE_DIR, MEDIA_DIR, Base, engine, upgrade_schema
 from .ratelimit import RateLimitMiddleware
 from .realtime import sio_app
-from .routers import admin, ai_routes, bookings, chat_routes, geo, items, users
+from .routers import admin, ai_routes, bookings, chat_routes, club_routes, geo, items, users
 
 Base.metadata.create_all(bind=engine)
 upgrade_schema()
@@ -27,7 +27,7 @@ app = FastAPI(
 # Content-Security-Policy for the admin console: only our own scripts, Google Maps frames.
 ADMIN_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data: https:; connect-src 'self'; "
+    "img-src 'self' data: blob: https:; connect-src 'self'; "
     "frame-src https://maps.google.com https://www.google.com; "
     "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 )
@@ -74,6 +74,7 @@ app.include_router(users.router)
 app.include_router(items.router)
 app.include_router(bookings.router)
 app.include_router(chat_routes.router)
+app.include_router(club_routes.router)
 app.include_router(admin.router)
 app.include_router(geo.router)
 app.include_router(ai_routes.router)

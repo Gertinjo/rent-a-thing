@@ -34,6 +34,20 @@ CATEGORIES = [
 LEGACY_CATEGORIES = {"cameras": "photo", "tents": "camping", "outdoor": "camping"}
 
 
+# Rent Club: renters with this many completed rentals get the badge, the discount and the members' chat.
+CLUB_MIN_RENTALS = 5
+
+
+class IdStatus:
+    NONE = "none"  # not submitted yet
+    PENDING = "pending"  # waiting for an admin
+    VERIFIED = "verified"
+    REJECTED = "rejected"  # can resubmit
+
+
+ID_DOC_TYPES = ("id_card", "passport", "driving_licence")
+
+
 class Review_:  # noqa: N801 - namespace for review/approval states
     PENDING = "pending"
     APPROVED = "approved"
@@ -68,8 +82,27 @@ class User(Base):
     approval_note: Mapped[str] = mapped_column(String(300), default="")
     # Completed rentals as a renter. 5+ makes you a Renting Club member (discount on bookings).
     rental_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Identity check: the user uploads a photo of an ID document and a selfie; an admin compares them.
+    # The images are kept in a private folder (never under /media) and deleted once an admin decides.
+    id_status: Mapped[str] = mapped_column(String(20), default=IdStatus.NONE)
+    id_doc_type: Mapped[str] = mapped_column(String(30), default="")
+    id_note: Mapped[str] = mapped_column(String(300), default="")
+    id_front_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    id_selfie_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    id_submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    id_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Last Rent Club chat message this user has seen (for the unread badge).
+    club_read_id: Mapped[int] = mapped_column(Integer, default=0)
 
     items: Mapped[list["Item"]] = relationship(back_populates="owner")
+
+    @property
+    def club_member(self) -> bool:
+        return (self.rental_count or 0) >= CLUB_MIN_RENTALS
+
+    @property
+    def id_verified(self) -> bool:
+        return self.id_status == IdStatus.VERIFIED
 
 
 class Item(Base):
@@ -258,3 +291,16 @@ class Notification(Base):
     item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ClubMessage(Base):
+    """Group chat for Rent Club members."""
+
+    __tablename__ = "club_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    sender: Mapped[User] = relationship()
