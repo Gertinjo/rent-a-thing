@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "Rent a Thing",
+    "slug": "rent-a-thing",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take photos and walk-around videos of the things you lend.",
+        "NSMicrophoneUsageDescription": "Record walk-around videos for 360° views.",
+        "NSPhotoLibraryUsageDescription": "Pick photos and videos of the things you lend.",
+        "NSMotionUsageDescription": "Twist your phone to look around items in 360°."
+      },
+      "bundleIdentifier": "app.rentathing.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "app.rentathing.mobile"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Pick photos and videos of the things you lend.",
+          "cameraPermission": "Take photos and walk-around videos of the things you lend.",
+          "microphonePermission": "Record walk-around videos for 360° views."
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "name": "Rent a Thing",
+      "shortName": "Rent a Thing",
+      "themeColor": "#1F7A5A",
+      "backgroundColor": "#F7F5F1",
+      "display": "standalone",
+      "orientation": "portrait"
+    }
+  }
+}

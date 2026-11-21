@@ -1,0 +1,11 @@
+backend/.venv/
+backend/rentathing.db
+backend/media/
+__pycache__/
+.pytest_cache/
+mobile/node_modules/
+mobile/.expo/
+.DS_Store
+mobile/dist/
+backend/.env
+backend/.secret_key
