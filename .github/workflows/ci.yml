@@ -26,7 +26,6 @@ jobs:
     env:
       AI_DISABLED: "1"
       RATE_LIMIT_DISABLED: "1"
-      SECRET_KEY: ci-only-not-a-real-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
