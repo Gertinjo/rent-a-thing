@@ -1,4 +1,4 @@
-# CI/CD for Rent a Thing
+# CI/CD for Rentify
 #   every push / PR : backend tests + dependency audit, app typecheck + web build, Docker build
 #   push to main    : the Docker image is also pushed to GitHub Container Registry (ghcr.io)
 name: CI

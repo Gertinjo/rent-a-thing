@@ -55,6 +55,7 @@ _ADDED_COLUMNS = {
         "id_submitted_at": "DATETIME",
         "id_verified_at": "DATETIME",
         "club_read_id": "INTEGER NOT NULL DEFAULT 0",
+        "club_granted": "BOOLEAN NOT NULL DEFAULT 0",
     },
     "items": {
         "lat": "FLOAT",
@@ -64,6 +65,8 @@ _ADDED_COLUMNS = {
         "review_note": "VARCHAR(300) NOT NULL DEFAULT ''",
         "ai_check": "TEXT",
         "terms_accepted": "BOOLEAN NOT NULL DEFAULT 0",
+        "promo_until": "DATETIME",
+        "promo_tagline": "VARCHAR(80) NOT NULL DEFAULT ''",
     },
     "bookings": {
         "platform_fee": "FLOAT NOT NULL DEFAULT 0",
@@ -73,6 +76,13 @@ _ADDED_COLUMNS = {
         "stripe_session_id": "VARCHAR(255)",
         "stripe_payment_intent": "VARCHAR(255)",
         "paid_at": "DATETIME",
+        "fee_label": "VARCHAR(60) NOT NULL DEFAULT ''",
+        "discount_code": "VARCHAR(30) NOT NULL DEFAULT ''",
+        "discount_amount": "FLOAT NOT NULL DEFAULT 0",
+    },
+    "promotions": {
+        "review_note": "VARCHAR(300) NOT NULL DEFAULT ''",
+        "decided_at": "DATETIME",
     },
     "contact_messages": {
         "status": "VARCHAR(20) NOT NULL DEFAULT 'open'",
@@ -94,9 +104,28 @@ def upgrade_schema() -> None:
             for name, ddl in cols.items():
                 if name not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+        if insp.has_table("users"):
+            # Admins and the demo account are verified automatically, see verification.auto_verify.
+            from .models import AUTO_VERIFIED_EMAILS
+
+            for email in AUTO_VERIFIED_EMAILS:
+                conn.execute(
+                    text("UPDATE users SET id_status = 'verified', id_note = '', id_verified_at = COALESCE(id_verified_at, CURRENT_TIMESTAMP) "
+                         "WHERE email = :e AND id_status != 'verified'"),
+                    {"e": email},
+                )
+            conn.execute(
+                text(
+                    "UPDATE users SET id_status = 'verified', id_note = '', id_verified_at = COALESCE(id_verified_at, CURRENT_TIMESTAMP) "
+                    "WHERE is_admin = 1 AND id_status != 'verified'"
+                )
+            )
         if insp.has_table("bookings"):
             # Rentals that finished before payments existed were settled in person.
             conn.execute(text("UPDATE bookings SET payment_status = 'cash_received' WHERE status = 'completed' AND payment_status = 'cash_due'"))
+        if insp.has_table("promotions"):
+            # Before admin review existed, a paid promotion went live at once.
+            conn.execute(text("UPDATE promotions SET status = 'approved', decided_at = COALESCE(decided_at, paid_at) WHERE status = 'paid'"))
         if insp.has_table("items"):
             from .models import LEGACY_CATEGORIES
 

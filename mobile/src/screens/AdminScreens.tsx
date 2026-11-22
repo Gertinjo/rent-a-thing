@@ -18,7 +18,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { admin, AdminItem, AdminMessage, AdminStats, AdminUser, AICheck, api, API_URL, mediaUrl } from '../api';
+import { admin, AdminItem, AdminMessage, AdminPromotion, AdminStats, AdminUser, AICheck, api, API_URL, mediaUrl } from '../api';
+import { SponsoredSlide } from '../components/PromoCarousel';
 import { Avatar, Button, Empty, IconName, ListGroup, ListRow, NavHeader, Segmented } from '../components/ui';
 import type { ScreenProps } from '../navigation';
 import { Alert } from '../platform';
@@ -267,10 +268,10 @@ export function AdminHomeScreen({ navigation }: ScreenProps<'Admin'>) {
     }, [load]),
   );
 
-  const waiting = st ? st.pending_users + st.pending_listings : 0;
+  const waiting = st ? st.pending_users + st.pending_listings + (st.pending_promotions ?? 0) : 0;
   const tiles: { label: string; value: string; sub: string; icon: IconName; color: string; go?: () => void }[] = st
     ? [
-        { label: 'To approve', value: String(waiting), sub: `${plural(st.pending_listings, 'listing')} · ${plural(st.pending_users, 'user')}`, icon: 'checkmark-circle', color: waiting ? c.accent : '#8E8E93', go: () => navigation.navigate('AdminApprovals') },
+        { label: 'To approve', value: String(waiting), sub: `${plural(st.pending_listings, 'listing')} · ${plural(st.pending_users, 'user')}${st.pending_promotions ? ` · ${plural(st.pending_promotions, 'promotion')}` : ''}`, icon: 'checkmark-circle', color: waiting ? c.accent : '#8E8E93', go: () => navigation.navigate('AdminApprovals') },
         { label: 'Messages', value: String(st.open_messages), sub: st.open_messages ? 'Need a reply' : 'All caught up', icon: 'mail', color: st.open_messages ? '#FF3B30' : '#8E8E93', go: () => navigation.navigate('AdminInbox') },
         { label: 'Live listings', value: String(st.listings_active), sub: `${st.listings_with_360} with 360°`, icon: 'cube', color: '#FF9500' },
         { label: 'Bookings', value: String(st.bookings_total), sub: `${st.bookings.pending} awaiting reply`, icon: 'calendar', color: '#5E5CE6' },
@@ -343,15 +344,16 @@ export function AdminHomeScreen({ navigation }: ScreenProps<'Admin'>) {
 // Approvals
 // ===========================================================================
 
-type Pending = { kind: 'item'; row: AdminItem } | { kind: 'user'; row: AdminUser };
+type Pending = { kind: 'item'; row: AdminItem } | { kind: 'user'; row: AdminUser } | { kind: 'promo'; row: AdminPromotion };
 
 export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals'>) {
   const { c } = useTheme();
   const s = useStyles();
   const insets = useSafeAreaInsets();
-  const [tab, setTab] = useState<'listings' | 'users'>('listings');
+  const [tab, setTab] = useState<'listings' | 'users' | 'promos'>('listings');
   const [items, setItems] = useState<AdminItem[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [promos, setPromos] = useState<AdminPromotion[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<Pending | null>(null);
@@ -378,9 +380,10 @@ export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [i, u] = await Promise.all([admin.items({ status: 'pending' }), admin.users({ filter: 'pending' })]);
+      const [i, u, p] = await Promise.all([admin.items({ status: 'pending' }), admin.users({ filter: 'pending' }), admin.promotions('pending')]);
       setItems(i);
       setUsers(u);
+      setPromos(p);
     } catch (e: any) {
       Alert.alert('Couldn’t load', e.message);
     } finally {
@@ -400,6 +403,10 @@ export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals
       if (p.kind === 'item') {
         await admin.updateItem(p.row.id, { review_status: approve ? 'approved' : 'rejected', reason: why });
         setItems((x) => x.filter((r) => r.id !== p.row.id));
+      } else if (p.kind === 'promo') {
+        await admin.decidePromotion(p.row.id, approve ? 'approved' : 'rejected', why);
+        setPromos((x) => x.filter((r) => r.id !== p.row.id));
+        if (!approve) Alert.alert('Rejected', `${money(p.row.amount)} was refunded to ${p.row.owner_name}.`);
       } else {
         await admin.updateUser(p.row.id, { approval_status: approve ? 'approved' : 'rejected', reason: why });
         setUsers((x) => x.filter((r) => r.id !== p.row.id));
@@ -439,8 +446,30 @@ export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals
           options={[
             { value: 'listings', label: 'Listings', badge: items.length },
             { value: 'users', label: 'People', badge: users.length },
+            { value: 'promos', label: 'Promos', badge: promos.length },
           ]}
         />
+        {tab === 'promos' &&
+          (promos.length === 0 && !loading ? (
+            <Empty icon="megaphone-outline" title="No promotions waiting" text="Paid promotions show up here. They only go into the Home slideshow after you approve them." />
+          ) : (
+            promos.map((p) => (
+              <View key={p.id} style={[s.card, { padding: 12, gap: 10 }]}>
+                <SponsoredSlide promo={{ title: p.item_title, tagline: p.tagline, price_per_day: p.price_per_day, owner_name: p.owner_name, cover_url: p.cover_url }} />
+                <View style={{ gap: 4, paddingHorizontal: 2 }}>
+                  <Text style={s.rowTitle}>
+                    {plural(p.days, 'day')} · {money(p.amount)} paid
+                  </Text>
+                  <Text style={s.rowSub}>
+                    {p.payment === 'stripe' ? 'Stripe test mode' : 'Demo card'} · by {p.owner_name} · {p.paid_at ? timeAgo(p.paid_at) : ''}
+                  </Text>
+                  {!p.item_active && <Text style={[s.rowSub, { color: c.danger }]}>The listing isn’t live right now.</Text>}
+                  {!!p.live_until && <Text style={s.rowSub}>Already live until {fmtDate(p.live_until.slice(0, 10))}; this adds {plural(p.days, 'day')}.</Text>}
+                </View>
+                {actions({ kind: 'promo', row: p })}
+              </View>
+            ))
+          ))}
         {tab === 'listings' &&
           (items.length === 0 && !loading ? (
             <Empty icon="cube-outline" title="No listings waiting" text="New listings show up here before they go live." />
@@ -480,7 +509,7 @@ export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals
           ))}
         {tab === 'users' &&
           (users.length === 0 && !loading ? (
-            <Empty icon="people-outline" title="No one waiting" text="New sign-ups can browse but can’t book until you approve them." />
+            <Empty icon="people-outline" title="No one waiting" text="People who want to lend show up here. Renters don’t need approval." />
           ) : (
             users.map((u) => (
               <View key={u.id} style={[s.card, { padding: 14, gap: 10 }]}>
@@ -493,7 +522,7 @@ export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals
                   <Text style={s.rowMeta}>{timeAgo(u.created_at)}</Text>
                 </View>
                 <Text style={s.rowSub}>
-                  {u.neighborhood || 'No neighbourhood'} · {plural(u.listings_count, 'listing')}
+                  Wants to lend · {u.neighborhood || 'No neighbourhood'} · {plural(u.listings_count, 'listing')}
                 </Text>
                 {!!u.bio && <Text style={{ ...type.callout, color: c.text }}>“{u.bio}”</Text>}
                 {actions({ kind: 'user', row: u })}
@@ -502,20 +531,34 @@ export function AdminApprovalsScreen({ navigation }: ScreenProps<'AdminApprovals
           ))}
       </ScrollView>
 
-      <Sheet visible={!!rejecting} onClose={() => setRejecting(null)} title={rejecting?.kind === 'item' ? 'Reject listing' : 'Reject account'}>
+      <Sheet
+        visible={!!rejecting}
+        onClose={() => setRejecting(null)}
+        title={rejecting?.kind === 'item' ? 'Reject listing' : rejecting?.kind === 'promo' ? 'Reject promotion' : 'Reject account'}
+      >
         {rejecting && (
           <>
             <Text style={s.rowSub}>
-              {rejecting.kind === 'item' ? `“${rejecting.row.title}” by ${rejecting.row.owner_name}` : `${rejecting.row.name} · ${rejecting.row.email}`}
+              {rejecting.kind === 'item'
+                ? `“${rejecting.row.title}” by ${rejecting.row.owner_name}`
+                : rejecting.kind === 'promo'
+                  ? `“${rejecting.row.item_title}” by ${rejecting.row.owner_name} · ${money(rejecting.row.amount)} will be refunded`
+                  : `${rejecting.row.name} · ${rejecting.row.email}`}
             </Text>
             <Text style={{ ...type.subhead, color: c.text }}>Tell them what to change — they’ll see this.</Text>
             <ReasonInput
               value={reason}
               onChange={setReason}
-              placeholder={rejecting.kind === 'item' ? 'e.g. Please add real photos and a pick-up location' : 'e.g. Please use your real name'}
+              placeholder={
+                rejecting.kind === 'item'
+                  ? 'e.g. Please add real photos and a pick-up location'
+                  : rejecting.kind === 'promo'
+                    ? 'e.g. Please don’t make price claims in the headline'
+                    : 'e.g. Please use your real name'
+              }
             />
             <Button
-              title="Reject"
+              title={rejecting.kind === 'promo' ? 'Reject and refund' : 'Reject'}
               variant="danger"
               onPress={() => decide(rejecting, false, reason.trim())}
               disabled={!reason.trim()}
@@ -619,7 +662,7 @@ export function AdminInboxScreen({ navigation }: ScreenProps<'AdminInbox'>) {
                 title="Reply by email"
                 variant="secondary"
                 icon="arrow-undo"
-                onPress={() => Linking.openURL(`mailto:${sel.email}?subject=${encodeURIComponent('Re: your message to Rent a Thing')}`)}
+                onPress={() => Linking.openURL(`mailto:${sel.email}?subject=${encodeURIComponent('Re: your message to Rentify')}`)}
               />
             )}
             <View style={{ gap: 6 }}>

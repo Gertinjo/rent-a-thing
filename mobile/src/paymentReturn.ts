@@ -12,6 +12,7 @@ export function usePaymentReturn(loggedIn: boolean) {
   useEffect(() => {
     if (!isWeb || !loggedIn || typeof window === 'undefined') return;
     const q = new URLSearchParams(window.location.search);
+    if (q.get('promo')) return promoReturn(q);
     const result = q.get('payment');
     const booking = Number(q.get('booking'));
     if (!result || !booking) return;
@@ -32,4 +33,23 @@ export function usePaymentReturn(loggedIn: boolean) {
       .catch((e) => Alert.alert('Couldn’t confirm the payment', e.message))
       .finally(() => setTimeout(openBookings, 300));
   }, [loggedIn]);
+}
+
+/** Stripe Checkout for a promotion returns to /?promo=success&item=3&promotion=7&session_id=cs_test_... */
+function promoReturn(q: URLSearchParams) {
+  const item = Number(q.get('item'));
+  const promotion = Number(q.get('promotion'));
+  window.history.replaceState(null, '', window.location.pathname);
+  if (!item || !promotion) return;
+  const openMyThings = () => navigationRef.isReady() && navigationRef.navigate('Tabs', { screen: 'My things' } as never);
+  if (q.get('promo') !== 'success') {
+    Alert.alert('Payment cancelled', 'No money was taken and your listing wasn’t promoted.');
+    setTimeout(openMyThings, 300);
+    return;
+  }
+  api
+    .confirmPromotion(item, promotion, q.get('session_id') ?? undefined)
+    .then((i) => Alert.alert('Payment done', `Our team will check your promotion for ${i.title}, usually within a day. Not approved means a full refund. (Stripe test mode, no real money.)`))
+    .catch((e) => Alert.alert('Couldn’t confirm the payment', e.message))
+    .finally(() => setTimeout(openMyThings, 300));
 }

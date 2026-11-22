@@ -4,7 +4,7 @@ members-only group chat. Live delivery of the chat is in app/realtime.py (room "
 Admins can read and post too (moderation).
 """
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .chat import MAX_MESSAGE_LEN, ChatError
@@ -38,20 +38,19 @@ def members(db: Session) -> list[User]:
     return list(
         db.scalars(
             select(User)
-            .where(User.rental_count >= CLUB_MIN_RENTALS, User.is_suspended.is_(False))
+            .where(or_(User.rental_count >= CLUB_MIN_RENTALS, User.club_granted.is_(True)), User.is_suspended.is_(False))
             .order_by(User.rental_count.desc(), User.name)
         ).all()
     )
 
 
-def info(db: Session, user: User, discount_percent: float) -> dict:
+def info(db: Session, user: User) -> dict:
     ms = members(db)
     return {
         "is_member": user.club_member,
         "can_chat": can_access(user),
         "rentals": user.rental_count or 0,
         "needed": CLUB_MIN_RENTALS,
-        "discount_percent": discount_percent,
         "member_count": len(ms),
         "members": [{"id": u.id, "name": u.name, "avatar_url": u.avatar_url, "rentals": u.rental_count} for u in ms[:30]],
         "unread": unread(db, user),

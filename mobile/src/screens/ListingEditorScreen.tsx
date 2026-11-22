@@ -4,7 +4,8 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api, CATEGORIES, Category, Item, LocalFile, mediaUrl, Place } from '../api';
+import { useAuth } from '../auth';
+import { api, CATEGORIES, Category, FeePeriod, Item, LocalFile, mediaUrl, Place } from '../api';
 import AIListingHelper from '../components/AIListingHelper';
 import LenderTermsModal from '../components/LenderTermsModal';
 import LocationPicker from '../components/LocationPicker';
@@ -19,7 +20,53 @@ const COMPAT = { preferredAssetRepresentationMode: ImagePicker.UIImagePickerPref
 
 const toFile = (a: ImagePicker.ImagePickerAsset): LocalFile => ({ uri: a.uri, name: a.fileName, mimeType: a.mimeType, file: a.file });
 
-export default function ListingEditorScreen({ route, navigation }: ScreenProps<'ListingEditor'>) {
+/** New listings need an approved lender account; renter-only accounts see how to apply instead. */
+export default function ListingEditorScreen(props: ScreenProps<'ListingEditor'>) {
+  const { user } = useAuth();
+  const isNew = !props.route.params?.id;
+  if (isNew && user && !user.is_admin && user.approval_status !== 'approved') return <LenderGate navigation={props.navigation} />;
+  return <ListingEditorForm {...props} />;
+}
+
+function LenderGate({ navigation }: { navigation: ScreenProps<'ListingEditor'>['navigation'] }) {
+  const { c } = useTheme();
+  const insets = useSafeAreaInsets();
+  const { user, setUser } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const st = user!.approval_status;
+  const apply = async () => {
+    setBusy(true);
+    try {
+      setUser(await api.applyToLend());
+    } catch (e: any) {
+      Alert.alert('Couldn’t send your request', e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const copy = {
+    none: { icon: 'cube-outline' as const, color: c.accent, t: 'Lend your things', d: 'Your account is set up for renting. To list things, apply to lend and an admin will review your account, usually within a few hours. You can keep renting meanwhile.' },
+    pending: { icon: 'hourglass-outline' as const, color: c.warning, t: 'We’re reviewing your lender account', d: 'You can list things as soon as an admin approves you, usually within a few hours. You can keep renting meanwhile.' },
+    rejected: { icon: 'alert-circle' as const, color: c.danger, t: 'Lending wasn’t approved', d: `${user!.approval_note || 'An admin couldn’t approve you as a lender.'} You can update your profile and apply again.` },
+  }[st === 'approved' ? 'pending' : st];
+  return (
+    <View style={{ flex: 1, backgroundColor: c.grouped }}>
+      <NavHeader title="List a thing" onBack={() => navigation.goBack()} />
+      <View style={{ flex: 1, padding: 24, paddingBottom: insets.bottom + 24, alignItems: 'center', justifyContent: 'center', gap: 14 }}>
+        <View style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: copy.color + '1F' }}>
+          <Ionicons name={copy.icon} size={34} color={copy.color} />
+        </View>
+        <Text style={{ ...type.title2, color: c.text, textAlign: 'center' }}>{copy.t}</Text>
+        <Text style={{ ...type.body, color: c.text2, textAlign: 'center', lineHeight: 22, maxWidth: 360 }}>{copy.d}</Text>
+        {st !== 'pending' && (
+          <Button title={st === 'rejected' ? 'Apply again' : 'Apply to lend'} icon="arrow-forward" onPress={apply} loading={busy} style={{ marginTop: 8, alignSelf: 'stretch' }} />
+        )}
+      </View>
+    </View>
+  );
+}
+
+function ListingEditorForm({ route, navigation }: ScreenProps<'ListingEditor'>) {
   const { c } = useTheme();
   const s = useStyles();
   const insets = useSafeAreaInsets();
@@ -32,11 +79,18 @@ export default function ListingEditorScreen({ route, navigation }: ScreenProps<'
   // Lender terms pop-up: shown every time a new product is added, before it's created.
   const [termsOpen, setTermsOpen] = useState(false);
   const [feePercent, setFeePercent] = useState(10);
+  const [feePeriods, setFeePeriods] = useState<FeePeriod[]>([]);
   // Photos picked for the AI helper; uploaded to the listing as soon as it's created.
   const [draftPhotos, setDraftPhotos] = useState<LocalFile[]>([]);
 
   useEffect(() => {
-    api.config().then((cfg) => setFeePercent(cfg.platform_fee_percent)).catch(() => {});
+    api
+      .config()
+      .then((cfg) => {
+        setFeePercent(cfg.platform_fee_percent);
+        setFeePeriods(cfg.fee_periods ?? []);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -231,8 +285,9 @@ export default function ListingEditorScreen({ route, navigation }: ScreenProps<'
           </View>
           <Text style={s.hint}>
             {priceValue > 0
-              ? `You earn ${money(earnings)} per day. Rent a Thing keeps a ${feePercent}% service fee (${money(priceValue - earnings)}).`
-              : `Rent a Thing keeps a ${feePercent}% service fee from each rental: €1 on €10, €2 on €20.`}
+              ? `You earn ${money(earnings)} per day. Rentify keeps a ${feePercent}% service fee (${money(priceValue - earnings)}).`
+              : `Rentify keeps a ${feePercent}% service fee from each rental: €1 on €10, €2 on €20.`}
+            {feePeriods.length > 0 && `\nSpecial fees for rentals starting: ${feePeriods.slice(0, 3).map(feePeriodText).join(' · ')}.`}
           </Text>
           <Field
             label="Description"
@@ -370,3 +425,10 @@ const useStyles = makeStyles((c) => ({
   hint: { ...type.footnote, color: c.text2 },
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: c.overlay, alignItems: 'center', justifyContent: 'center' },
 }));
+
+const fmtMD = (iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+/** "Black Friday (Nov 27) 3%", "Summer (Jun 1 – Aug 31, every year) 15%" */
+function feePeriodText(p: FeePeriod) {
+  const dates = p.start_date === p.end_date ? fmtMD(p.start_date) : `${fmtMD(p.start_date)} – ${fmtMD(p.end_date)}`;
+  return `${p.name} (${dates}${p.yearly ? ', every year' : ''}${p.active ? ', on now' : ''}) ${p.fee_percent}%`;
+}

@@ -1,12 +1,13 @@
 """Business logic shared by the routers: availability, ratings, and serializers."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import schemas
-from .models import CLUB_MIN_RENTALS, AppSetting, Blackout, Booking, BookingStatus, Item, Notification, Review, Review_, User
+from . import city
+from .models import CLUB_MIN_RENTALS, AppSetting, Blackout, Booking, BookingStatus, Item, Notification, Promotion, Review, Review_, User
 
 # ---------- availability ----------
 
@@ -99,7 +100,6 @@ DEFAULT_SETTINGS = {
     "approve_users": "1",
     "approve_listings": "1",
     "platform_fee_percent": "10",
-    "club_discount_percent": "10",
     # Every user must have a verified ID before they can book or list something.
     "require_id": "1",
 }
@@ -131,12 +131,79 @@ def set_setting_str(db: Session, key: str, value: str) -> None:
         row.value = value
 
 
-def club_discount_percent(db: Session) -> float:
-    return float(get_setting_str(db, "club_discount_percent"))
+# ---------- service fee (normal + special periods) ----------
+
+
+def _md(d: date) -> tuple[int, int]:
+    return (d.month, d.day)
+
+
+def period_covers(p: "FeePeriod", d: date) -> bool:
+    if not p.yearly:
+        return p.start_date <= d <= p.end_date
+    s, e, k = _md(p.start_date), _md(p.end_date), _md(d)
+    return s <= k <= e if s <= e else (k >= s or k <= e)  # e.g. Dec 20 – Jan 5 wraps the new year
+
+
+def period_length(p: "FeePeriod") -> int:
+    if not p.yearly:
+        return (p.end_date - p.start_date).days + 1
+    s, e = date(2001, *_md(p.start_date)), date(2001, *_md(p.end_date))  # 2001: not a leap year
+    return (e - s).days + 1 if s <= e else 365 - (s - e).days + 1
+
+
+def base_fee_percent(db: Session) -> float:
+    return float(get_setting_str(db, "platform_fee_percent"))
+
+
+def upcoming_fee_periods(db: Session) -> list[dict]:
+    """Special fees that are on now or still to come (yearly ones always), soonest first. For the app."""
+    from .models import FeePeriod
+
+    today = date.today()
+    out = []
+    for p in db.scalars(select(FeePeriod)).all():
+        if not p.yearly and p.end_date < today:
+            continue
+        nxt = p.start_date
+        if p.yearly:  # next time it starts (or today, if it's on now)
+            nxt = today if period_covers(p, today) else next(today + timedelta(days=i) for i in range(1, 367) if period_covers(p, today + timedelta(days=i)))
+        out.append({"name": p.name, "start_date": p.start_date.isoformat(), "end_date": p.end_date.isoformat(),
+                    "fee_percent": p.fee_percent, "yearly": p.yearly, "active": period_covers(p, today), "_next": max(nxt, today)})
+    out.sort(key=lambda x: x.pop("_next"))
+    return out
+
+
+def fee_for(db: Session, start: date) -> tuple[float, str]:
+    """(fee %, period name) for a rental starting on `start`. If periods overlap, the shortest wins,
+    so a one-day Black Friday inside a month-long November period still applies."""
+    from .models import FeePeriod
+
+    hits = [p for p in db.scalars(select(FeePeriod)).all() if period_covers(p, start)]
+    if not hits:
+        return base_fee_percent(db), ""
+    best = min(hits, key=lambda p: (period_length(p), -p.id))
+    return best.fee_percent, best.name
 
 
 def is_club_member(user: User) -> bool:
     return user.club_member
+
+
+def lender_status_for_new_request(db: Session) -> str:
+    """A lender application waits for an admin when "approve_users" is on, otherwise it's approved at once."""
+    return Review_.PENDING if get_setting(db, "approve_users") else Review_.APPROVED
+
+
+def can_lend(user: User) -> bool:
+    return user.is_admin or user.approval_status == Review_.APPROVED
+
+
+LENDER_BLOCK_MESSAGE = {
+    "none": "Your account is set up for renting. Apply to lend from Profile and an admin will review it.",
+    "pending": "Your lender application is being reviewed. You can list things as soon as it’s approved.",
+    "rejected": "Your lender application wasn’t approved. Contact support for help.",
+}
 
 
 def id_required(db: Session, user: User) -> bool:
@@ -149,15 +216,6 @@ ID_BLOCK_MESSAGE = {
     "pending": "Your ID is being checked. You can continue as soon as it’s verified (usually within a day).",
     "rejected": "Your ID couldn’t be verified. Please send a new photo: Profile → Verify your ID.",
 }
-
-
-def apply_club_discount(subtotal: float, user: User, db: Session) -> tuple[float, float]:
-    """Returns (discount_amount, discounted_total)."""
-    if is_club_member(user):
-        pct = club_discount_percent(db)
-        discount = round(subtotal * pct / 100, 2)
-        return discount, round(subtotal - discount, 2)
-    return 0.0, subtotal
 
 
 def increment_rental_counts(db: Session) -> list[int]:
@@ -182,8 +240,7 @@ def increment_rental_counts(db: Session) -> list[int]:
                         user_id=user.id,
                         kind="club_joined",
                         title="Welcome to the Rent Club 🎉",
-                        body=f"{CLUB_MIN_RENTALS} rentals done! You get the club badge, "
-                        f"{get_setting_str(db, 'club_discount_percent')}% off bookings and the members’ chat.",
+                        body=f"{CLUB_MIN_RENTALS} rentals done! You get the club badge and the members’ chat.",
                     )
                 )
     return joined
@@ -290,6 +347,7 @@ def item_out(db: Session, item: Item, viewer: User | None = None) -> schemas.Ite
     avg, count = item_rating(db, item.id)
     return schemas.ItemOut(
         id=item.id,
+        in_home_city=city.item_in_city(item),
         title=item.title,
         description=item.description,
         category=item.category,
@@ -308,7 +366,47 @@ def item_out(db: Session, item: Item, viewer: User | None = None) -> schemas.Ite
         location=location_out(db, item, viewer),
         review_status=item.review_status,
         review_note=item.review_note,
+        promo_until=item.promo_until if is_promoted(item) else None,
+        promo_tagline=item.promo_tagline,
+        **(dict(zip(("promo_review", "promo_review_note"), promo_review(db, item))) if viewer and viewer.id == item.owner_id else {}),
     )
+
+
+def is_promoted(item: Item) -> bool:
+    return item.promo_until is not None and item.promo_until > datetime.utcnow()
+
+
+def mark_promotion_paid(p: Promotion, intent: str | None) -> bool:
+    """Payment went through: the order now waits for an admin. Returns False if it was already paid."""
+    if p.status != "unpaid":
+        return False
+    p.status = "pending"
+    p.stripe_payment_intent = intent
+    p.paid_at = datetime.utcnow()
+    return True
+
+
+def approve_promotion(p: Promotion) -> None:
+    """Admin approved: put the item in the slideshow. Paid days are added to any time still left."""
+    now = datetime.utcnow()
+    p.status = "approved"
+    p.decided_at = now
+    p.review_note = ""
+    item = p.item
+    start = item.promo_until if item.promo_until and item.promo_until > now else now
+    item.promo_until = start + timedelta(days=p.days)
+    item.promo_tagline = p.tagline
+
+
+def promo_review(db: Session, item: Item) -> tuple[str, str]:
+    """For the owner: ('pending', '') while a paid order waits for review, ('rejected', note) if the
+    latest decision was a rejection, else ('none', '')."""
+    last = db.scalars(
+        select(Promotion).where(Promotion.item_id == item.id, Promotion.status != "unpaid").order_by(Promotion.paid_at.desc()).limit(1)
+    ).first()
+    if not last or last.status == "approved":
+        return "none", ""
+    return last.status, last.review_note
 
 
 def item_brief(db: Session, item: Item) -> schemas.ItemBrief:
@@ -326,6 +424,7 @@ def item_brief(db: Session, item: Item) -> schemas.ItemBrief:
         owner_id=item.owner_id,
         owner_name=item.owner.name,
         location_label=location_out(db, item, None).label if item.lat is not None else item.neighborhood,
+        in_home_city=city.item_in_city(item),
     )
 
 
@@ -333,7 +432,7 @@ def booking_out(db: Session, booking: Booking, me: User) -> schemas.BookingOut:
     role = "owner" if booking.item.owner_id == me.id else "renter"
     reviewed = any(r.reviewer_id == me.id for r in booking.reviews)
     subtotal = round(booking.days * booking.item.price_per_day, 2)
-    club_discount = round(max(0.0, subtotal - booking.total_price), 2)
+    club_discount = round(max(0.0, subtotal - booking.total_price - (booking.discount_amount or 0)), 2)
     return schemas.BookingOut(
         id=booking.id,
         item=item_brief(db, booking.item),
@@ -346,6 +445,9 @@ def booking_out(db: Session, booking: Booking, me: User) -> schemas.BookingOut:
         platform_fee=booking.platform_fee,
         owner_payout=booking.owner_payout,
         club_discount=club_discount,
+        discount_code=booking.discount_code or "",
+        discount_amount=booking.discount_amount or 0,
+        fee_label=booking.fee_label or "",
         status=booking.status,
         message=booking.message,
         created_at=booking.created_at,
@@ -355,6 +457,31 @@ def booking_out(db: Session, booking: Booking, me: User) -> schemas.BookingOut:
         paid_at=booking.paid_at,
         can_review=booking.status == BookingStatus.COMPLETED and not reviewed,
         reviewed_by_me=reviewed,
+        handover_photos=[handover_photo_out(p, me) for p in booking.handover_photos],
+        can_add_handover=can_add_handover(booking),
+    )
+
+
+# ---------- handover photos (condition at pick-up and return) ----------
+
+HANDOVER_STAGES = ("pickup", "return")
+HANDOVER_MAX_PER_STAGE = 6  # per person, per stage
+HANDOVER_DELETE_MINUTES = 15  # time to remove a wrong photo; after that it stays as a record
+
+
+def can_add_handover(b: Booking, today: date | None = None) -> bool:
+    """From the day before pick-up until 3 days after the last day (rentals auto-complete the day after)."""
+    today = today or date.today()
+    return b.status in (BookingStatus.ACCEPTED, BookingStatus.COMPLETED) and (
+        b.start_date - timedelta(days=1) <= today <= b.end_date + timedelta(days=3)
+    )
+
+
+def handover_photo_out(p, me: User) -> schemas.HandoverPhotoOut:
+    fresh = datetime.utcnow() - p.created_at < timedelta(minutes=HANDOVER_DELETE_MINUTES)
+    return schemas.HandoverPhotoOut(
+        id=p.id, stage=p.stage, url=p.url, uploader_id=p.uploader_id, created_at=p.created_at,
+        can_delete=p.uploader_id == me.id and fresh,
     )
 
 

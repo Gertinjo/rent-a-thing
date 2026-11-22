@@ -16,6 +16,8 @@ class RegisterIn(BaseModel):
     email: str = Field(min_length=3, max_length=160)
     password: str = Field(min_length=8, max_length=128)
     neighborhood: str = ""
+    # False: renter only (straight into the app). True: also wants to lend, which an admin approves.
+    lender: bool = False
 
     @field_validator("email")
     @classmethod
@@ -51,7 +53,7 @@ class UserOut(UserBrief):
 class MeOut(UserOut):
     email: str
     is_admin: bool = False
-    approval_status: str = "approved"
+    approval_status: str = "approved"  # lender approval: none (renter only) | pending | approved | rejected
     approval_note: str = ""
     listings_count: int = 0
     rentals_count: int = 0  # things I rented (completed)
@@ -149,6 +151,7 @@ class PhotoOut(ORM):
 
 class ItemOut(BaseModel):
     id: int
+    in_home_city: bool = True
     title: str
     description: str
     category: str
@@ -167,6 +170,11 @@ class ItemOut(BaseModel):
     location: LocationOut | None
     review_status: str
     review_note: str
+    promo_until: datetime | None = None
+    promo_tagline: str = ""
+    # Owner only: "pending" while a paid promotion waits for an admin, "rejected" (refunded) with the reason.
+    promo_review: str = "none"
+    promo_review_note: str = ""
 
 
 class ItemBrief(BaseModel):
@@ -182,6 +190,18 @@ class ItemBrief(BaseModel):
     owner_id: int
     owner_name: str
     location_label: str = ""
+    in_home_city: bool = True  # inside the app's home city (Prishtina), see app/city.py
+
+
+class PromoteIn(BaseModel):
+    tagline: str = Field(default="", max_length=80)
+    days: int = 7  # must be one of payments.PROMO_PLANS
+
+
+class PromoSlide(ItemBrief):
+    """A promoted listing shown in the home slideshow."""
+    tagline: str
+    promo_until: datetime
 
 
 # ---------- calendar ----------
@@ -221,6 +241,40 @@ class BookingCreate(DateRange):
     item_id: int
     message: str = ""
     payment_method: Literal["card", "cash"] = "card"
+    discount_code: str = Field(default="", max_length=40)
+
+
+class DiscountCheckIn(DateRange):
+    item_id: int
+    code: str = Field(max_length=40)
+
+
+class DiscountCheckOut(BaseModel):
+    code: str
+    label: str
+    percent_off: float
+    subtotal: float
+    discount: float
+    total: float
+
+
+class FeaturedDiscountOut(BaseModel):
+    code: str
+    label: str
+    percent_off: float
+    max_off: float
+    starts_on: date
+    ends_on: date
+    live: bool
+
+
+class HandoverPhotoOut(BaseModel):
+    id: int
+    stage: Literal["pickup", "return"]
+    url: str
+    uploader_id: int
+    created_at: datetime
+    can_delete: bool = False
 
 
 class BookingOut(BaseModel):
@@ -234,7 +288,10 @@ class BookingOut(BaseModel):
     total_price: float
     platform_fee: float
     owner_payout: float
-    club_discount: float = 0
+    club_discount: float = 0  # only on bookings made while the club had a price discount
+    discount_code: str = ""
+    discount_amount: float = 0  # paid by Rentify; the renter's total is already reduced
+    fee_label: str = ""
     status: str
     message: str
     created_at: datetime
@@ -244,6 +301,9 @@ class BookingOut(BaseModel):
     paid_at: datetime | None = None
     can_review: bool
     reviewed_by_me: bool
+    # condition photos taken at pick-up and return (either side can add them)
+    handover_photos: list[HandoverPhotoOut] = []
+    can_add_handover: bool = False
 
 
 # ---------- reviews ----------

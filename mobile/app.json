@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Rent a Thing",
+    "name": "Rentify",
     "slug": "rent-a-thing",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -18,7 +18,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#E2572B",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -44,12 +44,17 @@
     ],
     "web": {
       "favicon": "./assets/favicon.png",
-      "name": "Rent a Thing",
-      "shortName": "Rent a Thing",
-      "themeColor": "#1F7A5A",
-      "backgroundColor": "#F7F5F1",
+      "name": "Rentify",
+      "shortName": "Rentify",
+      "themeColor": "#FBF6EE",
+      "backgroundColor": "#FBF6EE",
       "display": "standalone",
       "orientation": "portrait"
+    },
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FBF6EE"
     }
   }
 }

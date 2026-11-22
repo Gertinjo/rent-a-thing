@@ -15,7 +15,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { PaymentMethod, api, Calendar, Item, mediaUrl, Review } from '../api';
+import { PaymentMethod, api, Calendar, DiscountCheck, Item, mediaUrl, Review } from '../api';
+import DiscountCodeField from '../components/DiscountCodeField';
 import { useAuth } from '../auth';
 import AvailabilityCalendar, { Selection } from '../components/AvailabilityCalendar';
 import MapEmbed from '../components/MapEmbed';
@@ -34,6 +35,7 @@ import {
   Stars,
 } from '../components/ui';
 import { UserBadges } from '../components/Badges';
+import { useHomeCity } from '../appConfig';
 import type { ScreenProps } from '../navigation';
 import { Alert } from '../platform';
 import { categoryLabel, daysBetween, fmtDate, fmtRange, makeStyles, money, type, useTheme } from '../theme';
@@ -51,8 +53,10 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
   const [mode, setMode] = useState<'360' | 'photos'>('360');
   const [sel, setSel] = useState<Selection>({});
   const [askOpen, setAskOpen] = useState(false);
+  const homeCity = useHomeCity();
   const [payWith, setPayWith] = useState<PaymentMethod>('card');
   const [message, setMessage] = useState('');
+  const [discount, setDiscount] = useState<DiscountCheck | null>(null);
   const [busy, setBusy] = useState(false);
 
   const isOwner = item?.owner.id === user?.id;
@@ -85,17 +89,21 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
   }
 
   const days = sel.start ? daysBetween(sel.start, sel.end ?? sel.start) + 1 : 0;
-  const total = days * item.price_per_day;
+  const subtotal = Math.round(days * item.price_per_day * 100) / 100;
+  // A code is checked for specific dates; drop it if the dates changed since.
+  const code = discount && discount.subtotal === subtotal ? discount : null;
+  const total = code ? code.total : subtotal;
   const heroH = Math.round(frameW * 1.02);
 
   const requestBooking = async () => {
     if (!sel.start) return;
     setBusy(true);
     try {
-      await api.requestBooking({ item_id: item.id, start_date: sel.start, end_date: sel.end ?? sel.start, message, payment_method: payWith });
+      await api.requestBooking({ item_id: item.id, start_date: sel.start, end_date: sel.end ?? sel.start, message, payment_method: payWith, discount_code: code?.code });
       setAskOpen(false);
       setSel({});
       setMessage('');
+      setDiscount(null);
       await load();
       Alert.alert('Request sent', `${item.owner.name.split(' ')[0]} will get back to you. You can follow it in Bookings.`);
     } catch (e: any) {
@@ -125,7 +133,7 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
     ]);
 
   const facts: { icon: IconName; title: string; text: string }[] = [
-    { icon: 'cash-outline', title: `${money(item.price_per_day)} per day`, text: 'Pay the owner at pick-up.' },
+    { icon: 'cash-outline' as IconName, title: `${money(item.price_per_day)} per day`, text: 'Pay by card in the app, or cash at pick-up.' },
     ...(item.deposit > 0
       ? [{ icon: 'shield-checkmark-outline' as IconName, title: `${money(item.deposit)} refundable deposit`, text: 'Returned when it comes back as you got it.' }]
       : []),
@@ -177,6 +185,17 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
 
           <Text style={s.eyebrow}>{categoryLabel[item.category] ?? item.category}</Text>
           <Text style={s.title}>{item.title}</Text>
+          {item.in_home_city === false && (
+            <View
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderRadius: 14, backgroundColor: c.warning + '1A', marginTop: 8 }}
+              accessibilityRole="alert"
+            >
+              <Ionicons name="warning" size={18} color={c.warning} />
+              <Text style={{ flex: 1, fontSize: 13, color: c.text, fontWeight: '600' }}>
+                Not in {homeCity}. Pick-up is in {item.location?.label || item.neighborhood || 'another city'}, so check you can get there before booking.
+              </Text>
+            </View>
+          )}
           <View style={s.metaRow}>
             <Rating avg={item.rating_avg} count={item.rating_count} size={14} />
             <Text style={s.dot}>·</Text>
@@ -330,7 +349,7 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
             <View style={{ flex: 1, paddingLeft: 10 }}>
               {sel.start ? (
                 <>
-                  <Text style={s.barPrice}>{isOwner ? `${days} day${days > 1 ? 's' : ''}` : money(total)}</Text>
+                  <Text style={s.barPrice}>{isOwner ? `${days} day${days > 1 ? 's' : ''}` : money(subtotal)}</Text>
                   <Text style={s.barSub}>
                     {fmtRange(sel.start, sel.end ?? sel.start)}
                     {!isOwner && ` · ${days} day${days > 1 ? 's' : ''}`}
@@ -377,8 +396,17 @@ export default function ItemDetailScreen({ route, navigation }: ScreenProps<'Ite
               <Text style={s.body}>
                 {money(item.price_per_day)} × {days} day{days > 1 ? 's' : ''}
               </Text>
-              <Text style={[s.body, { fontWeight: '600' }]}>{money(total)}</Text>
+              <Text style={[s.body, { fontWeight: '600' }]}>{money(subtotal)}</Text>
             </View>
+            {sel.start && (
+              <DiscountCodeField itemId={item.id} start={sel.start} end={sel.end ?? sel.start} applied={code} onApplied={setDiscount} />
+            )}
+            {code && (
+              <View style={s.sumRow}>
+                <Text style={[s.body, { fontWeight: '700' }]}>Total</Text>
+                <Text style={[s.body, { fontWeight: '800' }]}>{money(total)}</Text>
+              </View>
+            )}
             {item.deposit > 0 && (
               <View style={s.sumRow}>
                 <Text style={s.meta}>Refundable deposit</Text>

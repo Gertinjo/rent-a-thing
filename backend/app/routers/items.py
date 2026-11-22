@@ -1,15 +1,16 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .. import schemas, services
+from .. import city, payments, schemas, services
 from ..database import get_db
 from ..deps import get_current_user, get_optional_user
 from .ai_routes import schedule_precheck
+from .bookings import ConfirmIn as PayConfirmIn, DemoCard
 from ..media import save_image, spin_from_images, spin_from_video
-from ..models import CATEGORIES, Blackout, Item, ItemPhoto, Review, Review_, SpinFrame, User
+from ..models import CATEGORIES, Blackout, Item, ItemPhoto, Promotion, Review, Review_, SpinFrame, User
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -70,6 +71,8 @@ def list_items(
     if available_from:
         end = available_to or available_from
         items = [i for i in items if not services.conflicts(db, i.id, available_from, end)]
+    # Home city (Prishtina) first, newest first within each group (sort is stable).
+    items = sorted(items, key=lambda i: not city.item_in_city(i))
     return [services.item_brief(db, i) for i in items]
 
 
@@ -77,6 +80,123 @@ def list_items(
 def my_items(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     items = db.scalars(select(Item).where(Item.owner_id == user.id).order_by(Item.created_at.desc())).all()
     return [services.item_out(db, i, user) for i in items]
+
+
+# ---------- promotions (home slideshow) ----------
+
+MAX_ACTIVE_PROMOS = 3  # per owner, so one person can't take over the slideshow
+
+
+@router.get("/promoted", response_model=list[schemas.PromoSlide])
+def promoted_items(db: Session = Depends(get_db)):
+    """Live, approved listings with a running promotion, soonest-ending last (newest promos first)."""
+    now = datetime.utcnow()
+    items = db.scalars(
+        select(Item)
+        .join(User, Item.owner_id == User.id)
+        .where(
+            Item.is_active.is_(True),
+            Item.review_status == Review_.APPROVED,
+            User.is_suspended.is_(False),
+            Item.promo_until.is_not(None),
+            Item.promo_until > now,
+        )
+        .order_by(Item.promo_until.desc())
+        .limit(8)
+    ).all()
+    return [
+        schemas.PromoSlide(**services.item_brief(db, i).model_dump(), tagline=i.promo_tagline, promo_until=i.promo_until)
+        for i in items
+    ]
+
+
+@router.get("/promotion-plans")
+def promotion_plans():
+    return {"mode": payments.mode(), "currency": "EUR", "plans": [{"days": d, "price": p} for d, p in payments.PROMO_PLANS.items()]}
+
+
+def _get_own_promotion(db: Session, item: Item, promotion_id: int) -> Promotion:
+    p = db.get(Promotion, promotion_id)
+    if not p or p.item_id != item.id:
+        raise HTTPException(404, "Promotion order not found")
+    return p
+
+
+@router.post("/{item_id}/promote")
+def promote_item(
+    item_id: int, body: schemas.PromoteIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Create a promotion order and start the card payment. Once paid, an admin reviews it before it goes live."""
+    item = _get_own_item(db, item_id, user)
+    if body.days not in payments.PROMO_PLANS:
+        raise HTTPException(422, f"Choose {', '.join(map(str, payments.PROMO_PLANS))} days")
+    if not item.is_active or item.review_status != Review_.APPROVED:
+        raise HTTPException(400, "Only live listings can be promoted.")
+    if not item.cover_url:
+        raise HTTPException(400, "Add a photo first — promotions show your listing's photo.")
+    if db.scalar(select(Promotion.id).where(Promotion.item_id == item.id, Promotion.status == "pending").limit(1)):
+        raise HTTPException(400, "This listing already has a promotion waiting for approval.")
+    now = datetime.utcnow()
+    running = set(
+        db.scalars(
+            select(Item.id).where(Item.owner_id == user.id, Item.id != item.id, Item.promo_until.is_not(None), Item.promo_until > now)
+        ).all()
+    )
+    waiting = set(
+        db.scalars(select(Promotion.item_id).where(Promotion.owner_id == user.id, Promotion.item_id != item.id, Promotion.status == "pending")).all()
+    )
+    if len(running | waiting) >= MAX_ACTIVE_PROMOS:
+        raise HTTPException(400, f"You can promote up to {MAX_ACTIVE_PROMOS} things at once.")
+    promo = Promotion(
+        item_id=item.id, owner_id=user.id, days=body.days, tagline=body.tagline.strip(), amount=payments.PROMO_PLANS[body.days]
+    )
+    db.add(promo)
+    db.flush()
+    # Send Stripe back to the page the owner paid from (same rule as booking payments).
+    origin = request.headers.get("origin", "")
+    base = origin if origin.startswith(("http://", "https://")) else str(request.base_url)
+    out = payments.start_promo_checkout(promo, item.title, base)
+    db.commit()
+    return out
+
+
+@router.post("/{item_id}/promote/{promotion_id}/confirm", response_model=schemas.ItemOut)
+def confirm_promotion(
+    item_id: int, promotion_id: int, body: PayConfirmIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """After Stripe Checkout redirects back: check with Stripe that it was paid. It then waits for an admin."""
+    item = _get_own_item(db, item_id, user)
+    promo = _get_own_promotion(db, item, promotion_id)
+    intent = payments.confirm_promo_stripe(promo, body.session_id)
+    if intent and services.mark_promotion_paid(promo, intent):
+        db.commit()
+    elif promo.status == "unpaid":
+        raise HTTPException(402, "Stripe hasn’t confirmed the payment yet.")
+    return services.item_out(db, item, user)
+
+
+@router.post("/{item_id}/promote/{promotion_id}/demo", response_model=schemas.ItemOut)
+def demo_pay_promotion(
+    item_id: int, promotion_id: int, card: DemoCard, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Built-in demo checkout (no Stripe key): accepts Stripe's test card numbers only."""
+    item = _get_own_item(db, item_id, user)
+    promo = _get_own_promotion(db, item, promotion_id)
+    if promo.status != "unpaid":
+        raise HTTPException(400, "Already paid")
+    payments.check_sim_card(card.number, card.exp, card.cvc)
+    services.mark_promotion_paid(promo, payments.sim_intent())
+    db.commit()
+    return services.item_out(db, item, user)
+
+
+@router.delete("/{item_id}/promote", response_model=schemas.ItemOut)
+def stop_promotion(item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Ends the promotion now. Days already paid for are not refunded."""
+    item = _get_own_item(db, item_id, user)
+    item.promo_until = None
+    db.commit()
+    return services.item_out(db, item, user)
 
 
 @router.post("", response_model=schemas.ItemOut, status_code=201)
@@ -89,6 +209,8 @@ def create_item(
     data = body.model_dump(exclude={"location"})
     if not body.terms_accepted:
         raise HTTPException(400, "You must accept the rental terms before listing an item.")
+    if not services.can_lend(user):
+        raise HTTPException(403, services.LENDER_BLOCK_MESSAGE.get(user.approval_status, services.LENDER_BLOCK_MESSAGE["none"]))
     if services.id_required(db, user):
         raise HTTPException(403, services.ID_BLOCK_MESSAGE.get(user.id_status, services.ID_BLOCK_MESSAGE["none"]))
     data["neighborhood"] = (data.get("neighborhood") or user.neighborhood or "").strip()

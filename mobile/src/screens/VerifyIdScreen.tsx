@@ -106,7 +106,7 @@ export default function VerifyIdScreen({ navigation }: ScreenProps<'VerifyId'>) 
             <View style={{ gap: 6 }}>
               <Text style={s.h1}>Keep the neighbourhood safe</Text>
               <Text style={s.p}>
-                Everyone on Rent a Thing verifies their identity before they can borrow or lend. It takes a minute: a photo of your ID and a quick selfie.
+                Everyone on Rentify verifies their identity before they can borrow or lend. It takes a minute: a photo of your ID and a quick selfie.
               </Text>
             </View>
 

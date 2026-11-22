@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../auth';
+import LogoMark from '../components/LogoMark';
 import { Button, Field, NavHeader } from '../components/ui';
 import type { ScreenProps } from '../navigation';
 import { Alert } from '../platform';
@@ -13,8 +15,8 @@ function Wordmark() {
   return (
     <View style={{ gap: 14 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-        <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: c.accent }} />
-        <Text style={{ fontSize: 15, fontWeight: '700', color: c.text2, letterSpacing: 1.5 }}>RENT A THING</Text>
+        <LogoMark size={30} />
+        <Text style={{ fontSize: 15, fontWeight: '700', color: c.text2, letterSpacing: 1.5 }}>RENTIFY</Text>
       </View>
       <Text style={{ fontSize: 40, lineHeight: 44, fontWeight: '800', color: c.text, letterSpacing: -1.2 }}>
         Borrow it from{'\n'}next door.
@@ -71,14 +73,17 @@ export function RegisterScreen({ navigation }: ScreenProps<'Register'>) {
   const { signUp } = useAuth();
   const s = useStyles();
   const insets = useSafeAreaInsets();
+  const { c } = useTheme();
   const [f, setF] = useState({ name: '', email: '', password: '', neighborhood: '' });
+  // Renters go straight in; lenders need an admin to approve them before they can list.
+  const [lender, setLender] = useState(false);
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof f) => (v: string) => setF((x) => ({ ...x, [k]: v }));
 
   const go = async () => {
     setBusy(true);
     try {
-      await signUp(f);
+      await signUp({ ...f, lender });
     } catch (err: any) {
       Alert.alert('Couldn’t create your account', err.message);
     } finally {
@@ -93,6 +98,30 @@ export function RegisterScreen({ navigation }: ScreenProps<'Register'>) {
         <Text style={s.title}>Create your account</Text>
         <Text style={s.sub}>It takes 20 seconds. Your email stays private.</Text>
         <View style={{ gap: 14, marginTop: 24 }}>
+          <View style={{ gap: 10 }} accessibilityRole="radiogroup">
+            {[
+              { v: false, icon: 'bag-handle-outline' as const, t: 'I just want to rent', d: 'Start right away. You verify your ID once before your first booking.' },
+              { v: true, icon: 'cube-outline' as const, t: 'I want to rent and lend', d: 'Rent right away. Listing your things unlocks after an admin approves you.' },
+            ].map((o) => {
+              const on = lender === o.v;
+              return (
+                <Pressable
+                  key={String(o.v)}
+                  onPress={() => setLender(o.v)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: on }}
+                  style={[s.choice, { borderColor: on ? c.accent : c.separator, backgroundColor: on ? c.accent + '14' : c.surface }]}
+                >
+                  <Ionicons name={o.icon} size={22} color={on ? c.accent : c.text2} />
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={s.choiceTitle}>{o.t}</Text>
+                    <Text style={s.choiceText}>{o.d}</Text>
+                  </View>
+                  <Ionicons name={on ? 'checkmark-circle' : 'ellipse-outline'} size={22} color={on ? c.accent : c.text3} />
+                </Pressable>
+              );
+            })}
+          </View>
           <Field label="Name" value={f.name} onChangeText={set('name')} placeholder="Jamie Lee" autoComplete="name" />
           <Field label="Neighbourhood" value={f.neighborhood} onChangeText={set('neighborhood')} placeholder="Maple Street" />
           <Field label="Email" value={f.email} onChangeText={set('email')} autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
@@ -113,4 +142,7 @@ const useStyles = makeStyles((c) => ({
   link: { ...type.callout, color: c.text2 },
   linkStrong: { color: c.accent, fontWeight: '600' },
   legal: { ...type.footnote, color: c.text2, textAlign: 'center', lineHeight: 18 },
+  choice: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 16, borderWidth: 1.5 },
+  choiceTitle: { ...type.headline, color: c.text },
+  choiceText: { ...type.subhead, color: c.text2, lineHeight: 19 },
 }));

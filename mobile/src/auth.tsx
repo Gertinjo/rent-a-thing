@@ -9,7 +9,7 @@ interface AuthState {
   user: Me | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (b: { name: string; email: string; password: string; neighborhood: string }) => Promise<void>;
+  signUp: (b: { name: string; email: string; password: string; neighborhood: string; lender: boolean }) => Promise<void>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
   setUser: (u: Me) => void;
@@ -28,7 +28,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const saved = await storage.get(KEY);
         if (saved) {
           setToken(saved);
-          setUser(await api.me());
+          const me = await api.me();
+          if (!me?.id || typeof me.name !== 'string') throw new Error('bad profile');
+          setUser(me);
         }
       } catch {
         setToken(null);
@@ -47,7 +49,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = useCallback(async (email: string, password: string) => accept(await api.login(email, password)), []);
   const signUp = useCallback(
-    async (b: { name: string; email: string; password: string; neighborhood: string }) => accept(await api.register(b)),
+    async (b: { name: string; email: string; password: string; neighborhood: string; lender: boolean }) => accept(await api.register(b)),
     [],
   );
   const signOut = useCallback(async () => {

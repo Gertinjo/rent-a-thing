@@ -143,6 +143,15 @@ export default function ProfileScreen() {
           value={user.club_member ? (clubUnread ? `${clubUnread} new` : 'Member') : `${Math.min(user.rental_count, 5)}/5 rentals`}
           onPress={() => nav.navigate('Club')}
         />
+        {!user.is_admin && (
+          <ListRow
+            icon="cube"
+            iconColor="#FF9500"
+            label="Lending"
+            value={{ none: 'Apply to lend', pending: 'Being reviewed', approved: 'Approved', rejected: 'Not approved' }[user.approval_status]}
+            onPress={() => nav.navigate('ListingEditor', {})}
+          />
+        )}
       </ListGroup>
 
       <ListGroup title="Account">

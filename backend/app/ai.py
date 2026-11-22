@@ -13,6 +13,7 @@ Anthropic SDK. Without any key every feature reports itself as disabled and the 
 
 import base64
 import json
+import logging
 import os
 import threading
 import time
@@ -37,6 +38,9 @@ PROVIDERS = {
         "model": "gemini-3.5-flash-lite",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "label": "Google Gemini (free tier)",
+        # tried in order when the main model is overloaded (503) or its free quota is used up (429);
+        # free-tier limits are per model, so another model usually still answers
+        "fallbacks": ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
     },
     "groq": {
         "key": "GROQ_API_KEY",
@@ -46,6 +50,8 @@ PROVIDERS = {
     },
     "anthropic": {"key": "ANTHROPIC_API_KEY", "model": "claude-haiku-5-5", "base_url": None, "label": "Anthropic Claude"},
 }
+
+log = logging.getLogger("rentathing.ai")
 
 _client = None
 _client_key = None
@@ -308,34 +314,55 @@ def _parse_openai_compatible(name: str, system: str, content: list[dict], schema
             ],
         },
     ]
+    # main model first, then the provider's fallbacks (only used for "busy" / "quota used up" answers)
+    models = list(dict.fromkeys([model(), *cfg.get("fallbacks", [])]))
     last_error = "The AI answer wasn’t in the expected format. Try again."
     with _http_client() as http:
-        for extra in attempts:
-            try:
-                r = http.post(url, headers=headers, json={**base_body, **extra})
-            except httpx.HTTPError:
-                raise AIError("Couldn’t reach the AI service. Check the internet connection.")
-            if r.status_code in (401, 403):
-                raise AIError(f"The {cfg['key']} was rejected. Check the key in backend/.env.")
-            if r.status_code == 429:
-                raise AIError("The free AI limit is used up for now. Try again in a minute (or tomorrow).")
-            if r.status_code == 400 and "response_format" in r.text.lower():
-                last_error = "This model doesn’t support structured answers."
-                continue  # try the JSON-mode fallback
-            if r.status_code >= 400:
-                raise AIError(f"AI service error ({r.status_code}): {r.text[:200]}")
-            choice: dict = {}
-            try:
-                choice = r.json()["choices"][0]
-                text = choice["message"].get("content") or ""
-                if isinstance(text, list):  # some providers return content parts
-                    text = "".join(part.get("text", "") for part in text)
-                text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                return schema.model_validate_json(text)
-            except (KeyError, IndexError, ValueError, ValidationError):
-                if choice.get("finish_reason") == "length":
-                    last_error = "The AI answer was incomplete. Try again."
-                continue
+        for i, model_name in enumerate(models):
+            if i:
+                time.sleep(1)  # give the service a moment before asking the next model
+            busy = False
+            for extra in attempts:
+                try:
+                    r = http.post(url, headers=headers, json={**base_body, "model": model_name, **extra})
+                except httpx.TimeoutException:
+                    raise AIError("The AI took too long to answer. Try again.")
+                except httpx.HTTPError:
+                    raise AIError("Couldn’t reach the AI service. Check the internet connection.")
+                if r.status_code in (401, 403):
+                    raise AIError(f"The {cfg['key']} was rejected. Check the key in backend/.env.")
+                if r.status_code == 429:
+                    last_error = "The free AI limit is used up for now. Try again in a minute (or tomorrow)."
+                    busy = True
+                    break  # this model's quota is gone: try the next model
+                if r.status_code in (500, 502, 503, 504):
+                    last_error = "The AI service is very busy right now. Try again in a minute."
+                    busy = True
+                    break  # overloaded ("high demand"): try the next model
+                if r.status_code == 400 and "response_format" in r.text.lower():
+                    last_error = "This model doesn’t support structured answers."
+                    continue  # try the JSON-mode fallback
+                if r.status_code >= 400:
+                    log.warning("AI %s/%s answered %s: %s", name, model_name, r.status_code, r.text[:300])
+                if r.status_code == 404 and i:
+                    busy = True
+                    break  # a fallback model this key can't use: skip it
+                if r.status_code >= 400:
+                    raise AIError(f"AI request failed ({r.status_code}). Try again shortly.")
+                choice: dict = {}
+                try:
+                    choice = r.json()["choices"][0]
+                    text = choice["message"].get("content") or ""
+                    if isinstance(text, list):  # some providers return content parts
+                        text = "".join(part.get("text", "") for part in text)
+                    text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                    return schema.model_validate_json(text)
+                except (KeyError, IndexError, ValueError, ValidationError):
+                    if choice.get("finish_reason") == "length":
+                        last_error = "The AI answer was incomplete. Try again."
+                    continue
+            if not busy:
+                break  # a real answer problem, not overload: another model won't help
     raise AIError(last_error)
 
 
@@ -356,7 +383,7 @@ class ListingDraft(BaseModel):
     note: str = Field(description="One short sentence for the owner: what to double-check, or empty")
 
 
-DRAFT_SYSTEM = f"""You help people list things on Rent a Thing, an app where neighbours lend each other items by the day.
+DRAFT_SYSTEM = f"""You help people list things on Rentify, an app where neighbours lend each other items by the day.
 Look at the photos (and the owner's optional note) and draft the listing.
 
 - Title: what it is, max 60 characters. Include brand/model only if clearly readable in a photo.
@@ -409,7 +436,7 @@ class Precheck(BaseModel):
     message_to_owner: str = Field(description="If not ok: 1-2 friendly sentences telling the owner exactly what to fix. Else empty.")
 
 
-PRECHECK_SYSTEM = f"""You help the admins of Rent a Thing, a neighbourhood rental app, review new listings before they go live.
+PRECHECK_SYSTEM = f"""You help the admins of Rentify, a neighbourhood rental app, review new listings before they go live.
 Check the listing against the rules and give the admin a short, practical verdict. The admin makes the final decision.
 
 Rules:

@@ -13,10 +13,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .. import ai, chat, payments, schemas, services, verification
+from .. import ai, chat, discounts, payments, schemas, services, verification
 from ..database import get_db
 from ..deps import require_admin
-from ..models import AdminAction, Booking, BookingStatus, ContactMessage, IdStatus, Item, Review, Review_, SpinFrame, User
+from ..models import AdminAction, Booking, BookingStatus, ContactMessage, DiscountCode, FeePeriod, IdStatus, Item, Promotion, Review, Review_, SpinFrame, User
 from ..realtime import push_notification
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -70,12 +70,14 @@ class StatsOut(BaseModel):
     revenue_upcoming: float
     platform_fees_completed: float
     platform_fees_upcoming: float
+    discounts_given: float = 0  # paid by Rentify on pending/accepted/completed bookings
     reviews: int
     avg_rating: float | None
     open_messages: int
     pending_users: int
     pending_ids: int = 0
     pending_listings: int
+    pending_promotions: int = 0
     bookings_per_day: list[DayCount]
     recent_actions: list[ActionOut]
 
@@ -100,12 +102,14 @@ class AdminUserOut(BaseModel):
     id_status: str = "none"
     rental_count: int = 0
     club_member: bool = False
+    club_granted: bool = False
 
 
 class AdminUserPatch(BaseModel):
     is_suspended: bool | None = None
     is_admin: bool | None = None
     approval_status: Literal["approved", "rejected", "pending"] | None = None
+    club_granted: bool | None = None
     reason: str = Field(default="", max_length=200)
 
 
@@ -144,6 +148,14 @@ class AdminItemPatch(BaseModel):
     reason: str = Field(default="", max_length=300)
 
 
+class AdminHandoverPhoto(BaseModel):
+    stage: str  # pickup | return
+    url: str
+    uploader_name: str
+    uploader_role: str  # renter | owner
+    created_at: datetime
+
+
 class AdminBookingOut(BaseModel):
     id: int
     item_id: int
@@ -157,7 +169,7 @@ class AdminBookingOut(BaseModel):
     end_date: date
     days: int
     total_price: float  # what the renter pays
-    platform_fee: float  # kept by Rent a Thing
+    platform_fee: float  # kept by Rentify
     owner_payout: float  # what the owner receives
     status: str
     message: str
@@ -165,6 +177,9 @@ class AdminBookingOut(BaseModel):
     payment_method: str = "cash"
     payment_status: str = "cash_due"
     paid_at: datetime | None = None
+    discount_code: str = ""
+    discount_amount: float = 0  # paid by Rentify
+    handover_photos: list[AdminHandoverPhoto] = []  # condition at pick-up / return, for disputes
 
 
 class ReasonIn(BaseModel):
@@ -281,6 +296,14 @@ def stats(_: User = Depends(require_admin), db: Session = Depends(get_db)):
         pending_users=count(select(func.count(User.id)).where(User.approval_status == Review_.PENDING)),
         pending_ids=count(select(func.count(User.id)).where(User.id_status == IdStatus.PENDING)),
         pending_listings=count(select(func.count(Item.id)).where(Item.review_status == Review_.PENDING)),
+        discounts_given=float(
+            db.scalar(
+                select(func.coalesce(func.sum(Booking.discount_amount), 0)).where(
+                    Booking.status.in_((BookingStatus.PENDING, BookingStatus.ACCEPTED, BookingStatus.COMPLETED))
+                )
+            )
+        ),
+        pending_promotions=count(select(func.count(Promotion.id)).where(Promotion.status == "pending")),
         bookings_per_day=per_day,
         recent_actions=_actions(db, 8),
     )
@@ -318,6 +341,7 @@ def _user_out(db: Session, u: User) -> AdminUserOut:
         id_status=u.id_status,
         rental_count=u.rental_count or 0,
         club_member=u.club_member,
+        club_granted=bool(u.club_granted),
     )
 
 
@@ -377,6 +401,17 @@ def update_user(user_id: int, body: AdminUserPatch, admin: User = Depends(requir
     if body.is_admin is not None and body.is_admin != u.is_admin:
         u.is_admin = body.is_admin
         _log(db, admin, "grant_admin" if body.is_admin else "revoke_admin", "user", u.id, u.name, body.reason)
+        verification.auto_verify(u)  # new admins get the verified badge automatically
+
+    if body.club_granted is not None and body.club_granted != bool(u.club_granted):
+        was_member = u.club_member
+        u.club_granted = body.club_granted
+        _log(db, admin, "grant_club" if body.club_granted else "revoke_club", "user", u.id, u.name, body.reason)
+        if u.club_member and not was_member:
+            n = chat.notify(db, u.id, "club_joined", "Welcome to the Rent Club 🎉",
+                            f"You’ve been made a member: the gold badge and the members’ chat.")
+            db.commit()
+            push_notification(u.id, chat.notification_out(n))
 
     db.commit()
     return _user_out(db, u)
@@ -485,6 +520,8 @@ def _booking_out(b: Booking) -> AdminBookingOut:
         owner_id=b.item.owner_id,
         owner_name=b.item.owner.name,
         start_date=b.start_date,
+        discount_code=b.discount_code or "",
+        discount_amount=b.discount_amount or 0,
         end_date=b.end_date,
         days=b.days,
         total_price=b.total_price,
@@ -496,6 +533,16 @@ def _booking_out(b: Booking) -> AdminBookingOut:
         payment_method=b.payment_method,
         payment_status=b.payment_status,
         paid_at=b.paid_at,
+        handover_photos=[
+            AdminHandoverPhoto(
+                stage=p.stage,
+                url=p.url,
+                uploader_name=b.renter.name if p.uploader_id == b.renter_id else b.item.owner.name,
+                uploader_role="renter" if p.uploader_id == b.renter_id else "owner",
+                created_at=p.created_at,
+            )
+            for p in b.handover_photos
+        ],
     )
 
 
@@ -652,6 +699,87 @@ def update_settings(body: SettingsPatch, admin: User = Depends(require_admin), d
 
 
 # ---------------------------------------------------------------------------
+# Fee periods (special service fee on chosen dates)
+# ---------------------------------------------------------------------------
+
+
+class FeePeriodIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    start_date: date
+    end_date: date
+    fee_percent: float = Field(ge=0, le=100)
+    yearly: bool = False
+
+
+class FeePeriodOut(FeePeriodIn):
+    id: int
+    active: bool
+    days: int
+
+
+def _period_out(p: FeePeriod) -> FeePeriodOut:
+    return FeePeriodOut(id=p.id, name=p.name, start_date=p.start_date, end_date=p.end_date, fee_percent=p.fee_percent,
+                        yearly=p.yearly, active=services.period_covers(p, date.today()), days=services.period_length(p))
+
+
+def _check_period(body: FeePeriodIn) -> None:
+    # A yearly period may wrap the new year (Dec 20 – Jan 5); a one-off one may not end before it starts.
+    if not body.yearly and body.end_date < body.start_date:
+        raise HTTPException(400, "The end date is before the start date")
+
+
+def _pct(v: float) -> str:
+    return f"{v:g}%"
+
+
+@router.get("/fee-periods", response_model=list[FeePeriodOut])
+def fee_periods(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    rows = db.scalars(select(FeePeriod).order_by(FeePeriod.yearly.desc(), FeePeriod.start_date)).all()
+    return [_period_out(p) for p in rows]
+
+
+@router.get("/fee-periods/quote")
+def fee_quote(start: date, _: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Which fee a booking starting on `start` would get."""
+    pct, label = services.fee_for(db, start)
+    return {"date": start, "fee_percent": pct, "label": label, "base_fee_percent": services.base_fee_percent(db)}
+
+
+@router.post("/fee-periods", response_model=FeePeriodOut, status_code=201)
+def add_fee_period(body: FeePeriodIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    _check_period(body)
+    p = FeePeriod(**body.model_dump())
+    db.add(p)
+    db.flush()
+    _log(db, admin, "add_fee_period", "fee_period", p.id, f"{p.name}: {_pct(p.fee_percent)} fee")
+    db.commit()
+    return _period_out(p)
+
+
+@router.put("/fee-periods/{period_id}", response_model=FeePeriodOut)
+def edit_fee_period(period_id: int, body: FeePeriodIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    p = db.get(FeePeriod, period_id)
+    if not p:
+        raise HTTPException(404, "Fee period not found")
+    _check_period(body)
+    for k, v in body.model_dump().items():
+        setattr(p, k, v)
+    _log(db, admin, "change_fee_period", "fee_period", p.id, f"{p.name}: {_pct(p.fee_percent)} fee")
+    db.commit()
+    return _period_out(p)
+
+
+@router.delete("/fee-periods/{period_id}", status_code=204)
+def delete_fee_period(period_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    p = db.get(FeePeriod, period_id)
+    if not p:
+        raise HTTPException(404, "Fee period not found")
+    _log(db, admin, "delete_fee_period", "fee_period", p.id, p.name)
+    db.delete(p)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # ID verification
 # ---------------------------------------------------------------------------
 
@@ -723,6 +851,8 @@ def decide_verification(user_id: int, body: VerificationDecision, admin: User = 
     if not u:
         raise HTTPException(404, "User not found")
     ok = body.decision == "verified"
+    if verification.is_auto_verified(u) and not ok:
+        raise HTTPException(400, "Admins and the demo account are verified automatically")
     verification.decide(u, ok, body.note)
     _log(db, admin, "verify_id" if ok else "reject_id", "user", u.id, f"ID {'verified' if ok else 'rejected'}: {u.name}", body.note)
     n = chat.notify(
@@ -735,3 +865,221 @@ def decide_verification(user_id: int, body: VerificationDecision, admin: User = 
     db.commit()
     push_notification(u.id, chat.notification_out(n))
     return _verification_out(u)
+
+
+# ---------------------------------------------------------------------------
+# Promotions (paid slots in the home slideshow): approve, or reject and refund
+# ---------------------------------------------------------------------------
+
+
+class AdminPromotionOut(BaseModel):
+    id: int
+    item_id: int
+    item_title: str
+    item_active: bool
+    cover_url: str | None
+    price_per_day: float
+    owner_id: int
+    owner_name: str
+    owner_email: str
+    days: int
+    tagline: str
+    amount: float
+    status: str
+    review_note: str
+    payment: str  # "stripe" | "demo"
+    created_at: datetime
+    paid_at: datetime | None
+    decided_at: datetime | None
+    live_until: datetime | None  # the item's current slideshow end, if running
+
+
+class PromotionDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    reason: str = Field(default="", max_length=300)
+
+
+def _promotion_out(p: Promotion) -> AdminPromotionOut:
+    i = p.item
+    intent = p.stripe_payment_intent or ""
+    return AdminPromotionOut(
+        id=p.id,
+        item_id=i.id,
+        item_title=i.title,
+        item_active=i.is_active and i.review_status == Review_.APPROVED,
+        cover_url=i.cover_url,
+        price_per_day=i.price_per_day,
+        owner_id=p.owner_id,
+        owner_name=p.owner.name if p.owner else "Deleted user",
+        owner_email=p.owner.email if p.owner else "",
+        days=p.days,
+        tagline=p.tagline,
+        amount=p.amount,
+        status=p.status,
+        review_note=p.review_note,
+        payment="stripe" if intent.startswith("pi_") and not intent.startswith("pi_sim_") else "demo",
+        created_at=p.created_at,
+        paid_at=p.paid_at,
+        decided_at=p.decided_at,
+        live_until=i.promo_until if services.is_promoted(i) else None,
+    )
+
+
+@router.get("/promotions", response_model=list[AdminPromotionOut])
+def promotions(
+    status: Literal["pending", "approved", "rejected", "all"] = "pending",
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    stmt = select(Promotion).where(Promotion.status != "unpaid")  # unpaid = checkout abandoned, nothing to review
+    if status != "all":
+        stmt = stmt.where(Promotion.status == status)
+    stmt = stmt.order_by(Promotion.paid_at.asc() if status == "pending" else Promotion.paid_at.desc()).limit(300)
+    return [_promotion_out(p) for p in db.scalars(stmt).all()]
+
+
+@router.post("/promotions/{promotion_id}", response_model=AdminPromotionOut)
+def decide_promotion(promotion_id: int, body: PromotionDecision, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    p = db.get(Promotion, promotion_id)
+    if not p:
+        raise HTTPException(404, "Promotion not found")
+    if p.status != "pending":
+        raise HTTPException(400, f"This promotion is already {p.status}")
+    title = p.item.title
+    if body.decision == "approved":
+        services.approve_promotion(p)
+        _log(db, admin, "approve_promotion", "item", p.item_id, f"{title} · {p.days} days · {services.money(p.amount)}", body.reason)
+        n = chat.notify(db, p.owner_id, "promotion_approved", "Your promotion is live",
+                        f"{title} is in the Home slideshow for {p.days} days.")
+    else:
+        if not body.reason.strip():
+            raise HTTPException(400, "Write why, so the owner knows what to change")
+        payments.refund_promotion(p)  # raises (and keeps it pending) if Stripe can't refund
+        p.status = "rejected"
+        p.decided_at = datetime.utcnow()
+        p.review_note = body.reason.strip()
+        _log(db, admin, "reject_promotion", "item", p.item_id, f"{title} · refunded {services.money(p.amount)}", body.reason)
+        n = chat.notify(db, p.owner_id, "promotion_rejected", "Promotion not approved",
+                        f"{title}: {p.review_note} You were refunded {services.money(p.amount)}.")
+    n.item_id = p.item_id
+    db.commit()
+    push_notification(p.owner_id, chat.notification_out(n))
+    return _promotion_out(p)
+
+
+# ---------------------------------------------------------------------------
+# Discount codes (renters type them when booking; Rentify pays the discount)
+# ---------------------------------------------------------------------------
+
+
+class DiscountCodeIn(BaseModel):
+    code: str = Field(min_length=3, max_length=30)
+    label: str = Field(default="", max_length=60)
+    percent_off: float = Field(gt=0, le=90)
+    max_off: float = Field(default=0, ge=0)
+    min_total: float = Field(default=0, ge=0)
+    starts_on: date
+    ends_on: date
+    max_uses: int = Field(default=0, ge=0)
+    once_per_user: bool = True
+    is_active: bool = True
+    featured: bool = False
+
+
+class DiscountCodeOut(DiscountCodeIn):
+    id: int
+    uses: int
+    given: float  # euros off so far (live bookings)
+    status: Literal["live", "scheduled", "ended", "paused", "used_up"]
+    created_at: datetime
+
+
+def _code_out(db: Session, d: DiscountCode) -> DiscountCodeOut:
+    n = discounts.uses(db, d)
+    given = db.scalar(
+        select(func.coalesce(func.sum(Booking.discount_amount), 0)).where(
+            Booking.discount_code == d.code, Booking.status.in_((BookingStatus.PENDING, BookingStatus.ACCEPTED, BookingStatus.COMPLETED))
+        )
+    )
+    today = date.today()
+    status = (
+        "paused" if not d.is_active
+        else "ended" if today > d.ends_on
+        else "used_up" if d.max_uses and n >= d.max_uses
+        else "scheduled" if today < d.starts_on
+        else "live"
+    )
+    return DiscountCodeOut(
+        id=d.id, code=d.code, label=d.label, percent_off=d.percent_off, max_off=d.max_off, min_total=d.min_total,
+        starts_on=d.starts_on, ends_on=d.ends_on, max_uses=d.max_uses, once_per_user=d.once_per_user,
+        is_active=d.is_active, featured=d.featured, uses=n, given=float(given or 0), status=status, created_at=d.created_at,
+    )
+
+
+def _check_code(db: Session, body: DiscountCodeIn, exclude_id: int | None = None) -> str:
+    code = discounts.normalize(body.code)
+    if not discounts.CODE_RE.match(code):
+        raise HTTPException(400, "Codes are 3–30 letters, numbers, - or _ (e.g. BLACKFRIDAY)")
+    if body.ends_on < body.starts_on:
+        raise HTTPException(400, "The end date is before the start date")
+    clash = db.scalar(select(DiscountCode).where(DiscountCode.code == code))
+    if clash and clash.id != exclude_id:
+        raise HTTPException(409, f"{code} already exists")
+    return code
+
+
+def _describe(d: DiscountCode) -> str:
+    cap = f", max €{d.max_off:g}" if d.max_off else ""
+    return f"{d.code}: {d.percent_off:g}% off{cap}, {d.starts_on:%d %b} – {d.ends_on:%d %b}"
+
+
+def _only_one_featured(db: Session, d: DiscountCode) -> None:
+    if d.featured:
+        for other in db.scalars(select(DiscountCode).where(DiscountCode.featured.is_(True), DiscountCode.id != d.id)).all():
+            other.featured = False
+
+
+@router.get("/discount-codes", response_model=list[DiscountCodeOut])
+def discount_codes(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    rows = db.scalars(select(DiscountCode).order_by(DiscountCode.starts_on.desc())).all()
+    return [_code_out(db, d) for d in rows]
+
+
+@router.post("/discount-codes", response_model=DiscountCodeOut, status_code=201)
+def add_discount_code(body: DiscountCodeIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    code = _check_code(db, body)
+    d = DiscountCode(**{**body.model_dump(), "code": code})
+    db.add(d)
+    db.flush()
+    _only_one_featured(db, d)
+    _log(db, admin, "add_discount_code", "discount_code", d.id, _describe(d))
+    db.commit()
+    return _code_out(db, d)
+
+
+@router.put("/discount-codes/{code_id}", response_model=DiscountCodeOut)
+def edit_discount_code(code_id: int, body: DiscountCodeIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    d = db.get(DiscountCode, code_id)
+    if not d:
+        raise HTTPException(404, "Code not found")
+    code = _check_code(db, body, exclude_id=d.id)
+    if code != d.code and discounts.uses(db, d):
+        raise HTTPException(400, "This code has been used, so it can’t be renamed. Make a new one instead.")
+    for k, v in {**body.model_dump(), "code": code}.items():
+        setattr(d, k, v)
+    _only_one_featured(db, d)
+    _log(db, admin, "change_discount_code", "discount_code", d.id, _describe(d))
+    db.commit()
+    return _code_out(db, d)
+
+
+@router.delete("/discount-codes/{code_id}", status_code=204)
+def delete_discount_code(code_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    d = db.get(DiscountCode, code_id)
+    if not d:
+        raise HTTPException(404, "Code not found")
+    if discounts.uses(db, d):
+        raise HTTPException(400, "This code is on bookings, so it can’t be deleted. Pause it instead.")
+    _log(db, admin, "delete_discount_code", "discount_code", d.id, d.code)
+    db.delete(d)
+    db.commit()

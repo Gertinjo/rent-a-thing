@@ -12,13 +12,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from .. import city
 from ..deps import get_current_user
 from ..models import User
 
 router = APIRouter(prefix="/geo", tags=["location"])
 
 GOOGLE_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
-USER_AGENT = "RentAThing/1.0 (neighbourhood rental app)"
+USER_AGENT = "Rentify/1.0 (neighbourhood rental app)"
 _cache: dict[str, list] = {}
 _lock = threading.Lock()
 _last_call = 0.0
@@ -85,7 +86,8 @@ def search(q: str = Query(min_length=3, max_length=200), _: User = Depends(get_c
     if GOOGLE_KEY:
         places = [_google_place(r) for r in _google({"address": q})[:5]]
     else:
-        rows = _nominatim("search", {"q": q, "limit": 5})
+        # Prefer places around the home city (Prishtina), but still find others.
+        rows = _nominatim("search", {"q": q, "limit": 5, "viewbox": city.viewbox(), "bounded": 0})
         places = [Place(label=_short_label(r.get("address", {}), r.get("display_name", q)), lat=float(r["lat"]), lng=float(r["lon"])) for r in rows]
     _cache[key] = places
     return places

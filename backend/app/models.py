@@ -46,9 +46,12 @@ class IdStatus:
 
 
 ID_DOC_TYPES = ("id_card", "passport", "driving_licence")
+# Accounts verified automatically besides admins: the "Explore with a demo account" login.
+AUTO_VERIFIED_EMAILS = ("demo@rentathing.app",)
 
 
 class Review_:  # noqa: N801 - namespace for review/approval states
+    NONE = "none"  # user accounts only: renter, never asked to lend
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
@@ -77,7 +80,8 @@ class User(Base):
     # Suspended users can't log in and their listings are hidden from Explore.
     is_suspended: Mapped[bool] = mapped_column(Boolean, default=False)
     suspended_reason: Mapped[str] = mapped_column(String(200), default="")
-    # New accounts can be reviewed by an admin before they can book (see the "approve_users" setting).
+    # Lender approval. Renter-only accounts are "none" and can book right away (after the ID check);
+    # listing things needs an admin to approve the account first (see the "approve_users" setting).
     approval_status: Mapped[str] = mapped_column(String(20), default=Review_.APPROVED)
     approval_note: Mapped[str] = mapped_column(String(300), default="")
     # Completed rentals as a renter. 5+ makes you a Renting Club member (discount on bookings).
@@ -93,12 +97,14 @@ class User(Base):
     id_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Last Rent Club chat message this user has seen (for the unread badge).
     club_read_id: Mapped[int] = mapped_column(Integer, default=0)
+    # Rent Club membership granted by an admin (otherwise it comes from CLUB_MIN_RENTALS completed rentals).
+    club_granted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     items: Mapped[list["Item"]] = relationship(back_populates="owner")
 
     @property
     def club_member(self) -> bool:
-        return (self.rental_count or 0) >= CLUB_MIN_RENTALS
+        return bool(self.club_granted) or (self.rental_count or 0) >= CLUB_MIN_RENTALS
 
     @property
     def id_verified(self) -> bool:
@@ -130,6 +136,9 @@ class Item(Base):
     ai_check: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Owner agreed to the rental terms when creating the listing.
     terms_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Promotion: while promo_until is in the future the listing appears in the home slideshow.
+    promo_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    promo_tagline: Mapped[str] = mapped_column(String(80), default="")
 
     owner: Mapped[User] = relationship(back_populates="items")
     photos: Mapped[list["ItemPhoto"]] = relationship(
@@ -142,6 +151,30 @@ class Item(Base):
         cascade="all, delete-orphan", order_by="Blackout.start_date"
     )
     bookings: Mapped[list["Booking"]] = relationship(back_populates="item", cascade="all, delete-orphan")
+
+
+class Promotion(Base):
+    """A paid order to show a listing in the home slideshow. Applied to the item once paid."""
+
+    __tablename__ = "promotions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    days: Mapped[int] = mapped_column(Integer)
+    tagline: Mapped[str] = mapped_column(String(80), default="")
+    amount: Mapped[float] = mapped_column(Float)
+    # unpaid -> pending (paid, waiting for an admin) -> approved (live) | rejected (refunded)
+    status: Mapped[str] = mapped_column(String(20), default="unpaid")
+    review_note: Mapped[str] = mapped_column(String(300), default="")
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stripe_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_payment_intent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    item: Mapped["Item"] = relationship()
+    owner: Mapped["User"] = relationship()
 
 
 class ItemPhoto(Base):
@@ -188,6 +221,11 @@ class Booking(Base):
     total_price: Mapped[float] = mapped_column(Float)
     platform_fee: Mapped[float] = mapped_column(Float, default=0)
     owner_payout: Mapped[float] = mapped_column(Float, default=0)
+    # Name of the special fee period that set platform_fee (e.g. "Black Friday"); empty = the normal fee.
+    fee_label: Mapped[str] = mapped_column(String(60), default="")
+    # Discount code used for this booking (Rentify pays it; the owner's payout is unchanged).
+    discount_code: Mapped[str] = mapped_column(String(30), default="")
+    discount_amount: Mapped[float] = mapped_column(Float, default=0)
     message: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -202,10 +240,40 @@ class Booking(Base):
     item: Mapped[Item] = relationship(back_populates="bookings")
     renter: Mapped[User] = relationship()
     reviews: Mapped[list["Review"]] = relationship(back_populates="booking", cascade="all, delete-orphan")
+    handover_photos: Mapped[list["HandoverPhoto"]] = relationship(
+        cascade="all, delete-orphan", order_by="HandoverPhoto.id", back_populates="booking"
+    )
 
     @property
     def days(self) -> int:
         return (self.end_date - self.start_date).days + 1
+
+
+class HandoverPhoto(Base):
+    """Photo of the item taken at pick-up or at return, as a record of its condition."""
+
+    __tablename__ = "handover_photos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey("bookings.id", ondelete="CASCADE"), index=True)
+    stage: Mapped[str] = mapped_column(String(10))  # pickup | return
+    uploader_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    url: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    booking: Mapped[Booking] = relationship(back_populates="handover_photos")
+
+
+class BookingReminder(Base):
+    """Which reminder was already sent for a booking (so each one goes out once)."""
+
+    __tablename__ = "booking_reminders"
+    __table_args__ = (UniqueConstraint("booking_id", "kind", name="uq_one_reminder_per_kind"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey("bookings.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # pickup | return
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Review(Base):
@@ -260,6 +328,42 @@ class AdminAction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     admin: Mapped[User | None] = relationship()
+
+
+class FeePeriod(Base):
+    """Dates when the service fee differs from the normal one (Black Friday 3%, summer 15%...).
+    Applies to bookings whose rental starts inside the period. yearly=True ignores the year."""
+
+    __tablename__ = "fee_periods"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(60))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    fee_percent: Mapped[float] = mapped_column(Float)
+    yearly: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DiscountCode(Base):
+    """A code renters type when booking (e.g. BLACKFRIDAY = 20% off). Rentify pays for the discount:
+    the renter pays less, the owner's payout doesn't change."""
+
+    __tablename__ = "discount_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(30), unique=True, index=True)  # stored upper-case
+    label: Mapped[str] = mapped_column(String(60), default="")  # e.g. "Black Friday"
+    percent_off: Mapped[float] = mapped_column(Float)
+    max_off: Mapped[float] = mapped_column(Float, default=0)  # euro cap per booking, 0 = no cap
+    min_total: Mapped[float] = mapped_column(Float, default=0)  # rental must cost at least this
+    starts_on: Mapped[date] = mapped_column(Date)
+    ends_on: Mapped[date] = mapped_column(Date)  # inclusive: the last day the code can be used
+    max_uses: Mapped[int] = mapped_column(Integer, default=0)  # 0 = unlimited
+    once_per_user: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    featured: Mapped[bool] = mapped_column(Boolean, default=False)  # shown in the app's Black Friday ads
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class AppSetting(Base):

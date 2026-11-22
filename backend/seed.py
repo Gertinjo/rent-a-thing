@@ -3,7 +3,7 @@
     python seed.py            # wipe + seed (renders 360° spins the first time, ~1 min)
     python seed.py --upgrade  # keep existing data; add map locations + the review-queue demo data
 
-The demo city is San Francisco. To use your own city, change CITY, NEIGHBOURHOODS and LOCATIONS
+The demo city is Prishtina (two listings are in Peja and Prizren). To use your own city, change CITY, NEIGHBOURHOODS and LOCATIONS
 below (any lat/lng works; labels are "street, area, city" and only "area, city" is shown publicly).
 
 Demo login:  demo@rentathing.app / demo1234   (also alice@, bob@, carla@ — same password)
@@ -19,25 +19,29 @@ from app.security import hash_password
 from seed_render import DEMO_OBJECTS, render, render_spin
 
 PASSWORD = "demo1234"
-CITY = "San Francisco"
+CITY = "Prishtina"
 NEIGHBOURHOODS = {
-    "demo@rentathing.app": "Mission",
-    "alice@rentathing.app": "Noe Valley",
-    "bob@rentathing.app": "Bernal Heights",
-    "carla@rentathing.app": "Hayes Valley",
-    "admin@rentathing.app": "SoMa",
-    "dan@rentathing.app": "Inner Sunset",
-    "mia@rentathing.app": "Inner Richmond",
+    "demo@rentathing.app": "Qyteza Pejton",
+    "alice@rentathing.app": "Arbëria",
+    "bob@rentathing.app": "Ulpiana",
+    "carla@rentathing.app": "Kodra e Diellit",
+    "admin@rentathing.app": "Qendra",
+    "dan@rentathing.app": "Prizren",
+    "mia@rentathing.app": "Bregu i Diellit",
 }
+# Most demo things are in Prishtina; a couple are in other Kosovo cities (Peja, Prizren), so the
+# "outside Prishtina" note can be shown too.
 LOCATIONS = {  # listing title -> (lat, lng, "street, area, city")
-    "Mirrorless camera + 35mm lens": (37.75165, -122.43372, "24th St, Noe Valley, San Francisco"),
-    "4-person dome tent": (37.73921, -122.41660, "Cortland Ave, Bernal Heights, San Francisco"),
-    "Cordless drill / driver 18V": (37.75872, -122.42141, "Valencia St, Mission, San Francisco"),
-    "City bike (size M)": (37.77652, -122.42431, "Hayes St, Hayes Valley, San Francisco"),
-    "Aluminium step ladder (6 steps)": (37.74083, -122.41472, "Bonview St, Bernal Heights, San Francisco"),
-    "HD projector + 2.5 m screen": (37.76413, -122.46648, "Irving St, Inner Sunset, San Francisco"),
-    "Party speaker with wireless mic": (37.75218, -122.43105, "Castro St, Noe Valley, San Francisco"),
+    "Mirrorless camera + 35mm lens": (42.66812, 21.15214, "Rr. Ismail Qemali, Arbëria, Prishtina"),
+    "Cordless drill / driver 18V": (42.65848, 21.15602, "Rr. Pashko Vasa, Qyteza Pejton, Prishtina"),
+    "City bike (size M)": (42.65544, 21.17985, "Rr. Fehmi Agani, Kodra e Diellit, Prishtina"),
+    "Aluminium step ladder (6 steps)": (42.65176, 21.17093, "Rr. Lidhja e Pejës, Ulpiana, Prishtina"),
+    "Party speaker with wireless mic": (42.66587, 21.15831, "Rr. Agim Ramadani, Qendra, Prishtina"),
+    "4-person dome tent": (42.65932, 20.28871, "Rr. Mbretëresha Teutë, Qendra, Peja"),
+    "HD projector + 2.5 m screen": (42.21394, 20.73972, "Rr. Remzi Ademaj, Qendra, Prizren"),
 }
+# Areas the demo used before it moved to Kosovo; --upgrade replaces them on demo users' other listings.
+OLD_AREAS = {"Mission", "Noe Valley", "Bernal Heights", "Hayes Valley", "SoMa", "Inner Sunset", "Inner Richmond"}
 CACHE = MEDIA_DIR / "_seed_cache"  # rendered frames survive re-seeding
 
 
@@ -62,6 +66,8 @@ def still_for(name: str, angle: float) -> str:
 def place(item: Item) -> None:
     if item.title in LOCATIONS:
         item.lat, item.lng, item.location_label = LOCATIONS[item.title]
+        *_, area, town = item.location_label.split(", ")
+        item.neighborhood = area if town == CITY else town  # "Ulpiana" in Prishtina, "Peja" elsewhere
 
 
 SEED_PHOTOS = Path(__file__).resolve().parent / "seed_photos"
@@ -131,14 +137,17 @@ def add_review_queue(db) -> None:
 
 
 def upgrade():
-    """Non-destructive: add locations to the demo listings and the review-queue demo data."""
+    """Non-destructive: put the demo listings in their demo places and add the review-queue demo data.
+    Only the seeded demo listings move (by title, or still at an old San Francisco demo address)."""
     db = SessionLocal()
     for u in db.query(User).all():
         if u.email in NEIGHBOURHOODS:
             u.neighborhood = NEIGHBOURHOODS[u.email]
     for item in db.query(Item).all():
-        if item.lat is None and item.title in LOCATIONS:
+        old_demo = (item.location_label or "").endswith("San Francisco")
+        if item.title in LOCATIONS and (item.lat is None or old_demo) and item.owner.email in NEIGHBOURHOODS:
             place(item)
+        elif item.neighborhood in OLD_AREAS and item.owner.email in NEIGHBOURHOODS:
             item.neighborhood = item.owner.neighborhood
     add_review_queue(db)
     db.commit()
@@ -158,16 +167,18 @@ def main():
     ago = lambda n: datetime.utcnow() - timedelta(days=n)  # noqa: E731
 
     pw = hash_password(PASSWORD)
-    demo = User(name="Sam Rivera", email="demo@rentathing.app", password_hash=pw, neighborhood="Mission",
-                bio="Weekend DIY-er. I lend my tools, I borrow everything else.", created_at=ago(200))
-    alice = User(name="Alice Chen", email="alice@rentathing.app", password_hash=pw, neighborhood="Noe Valley",
+    demo = User(name="Sam Rivera", email="demo@rentathing.app", password_hash=pw, neighborhood=NEIGHBOURHOODS["demo@rentathing.app"],
+                bio="Weekend DIY-er. I lend my tools, I borrow everything else.", created_at=ago(200),
+                id_status="verified", id_verified_at=datetime.utcnow())  # demo account: auto-verified
+    alice = User(name="Alice Chen", email="alice@rentathing.app", password_hash=pw, neighborhood=NEIGHBOURHOODS["alice@rentathing.app"],
                  bio="Photographer. Happy to show you how the camera works.", created_at=ago(320))
-    bob = User(name="Bob Okafor", email="bob@rentathing.app", password_hash=pw, neighborhood="Bernal Heights",
+    bob = User(name="Bob Okafor", email="bob@rentathing.app", password_hash=pw, neighborhood=NEIGHBOURHOODS["bob@rentathing.app"],
                bio="Camping gear hoarder. Everything comes back clean, promise.", created_at=ago(150))
-    carla = User(name="Carla Diaz", email="carla@rentathing.app", password_hash=pw, neighborhood="Hayes Valley",
+    carla = User(name="Carla Diaz", email="carla@rentathing.app", password_hash=pw, neighborhood=NEIGHBOURHOODS["carla@rentathing.app"],
                  bio="Cyclist and occasional hiker.", created_at=ago(90))
     admin = User(name="Robin Admin", email="admin@rentathing.app", password_hash=hash_password("admin1234"),
-                 neighborhood="SoMa", bio="Keeping the neighbourhood friendly.", is_admin=True, created_at=ago(400))
+                 neighborhood=NEIGHBOURHOODS["admin@rentathing.app"], bio="Keeping the neighbourhood friendly.", is_admin=True, created_at=ago(400),
+                 id_status="verified", id_verified_at=datetime.utcnow())
     db.add_all([demo, alice, bob, carla, admin])
     db.flush()
 

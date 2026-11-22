@@ -5,12 +5,17 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, RefreshControl, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api, CATEGORIES, ItemBrief, mediaUrl } from '../api';
+import { api, CATEGORIES, ItemBrief, mediaUrl, PromoSlide } from '../api';
 import { useAuth } from '../auth';
 import AccountBanner from '../components/AccountBanner';
+import LogoMark from '../components/LogoMark';
+import PromoCarousel from '../components/PromoCarousel';
+import PromoPopup from '../components/PromoPopup';
 import { Empty, useTabBarSpace } from '../components/ui';
 import type { RootStackParamList } from '../navigation';
 import { useRealtime } from '../realtime';
+import { useHomeCity } from '../appConfig';
+import { CLUB_GOLD } from '../components/Badges';
 import { addDays, categoryIcon, categoryLabel, categoryTile, fmtDate, isoDay, makeStyles, money, type, useTheme } from '../theme';
 
 /** Round icon in the header with a red count badge (messages, notifications). */
@@ -43,7 +48,11 @@ function weekend(): { from: string; to: string } {
   return { from: sat, to: addDays(sat, 1) };
 }
 
-const area = (i: ItemBrief) => (i.location_label || i.neighborhood || 'Nearby').split(',')[0];
+// Area in the home city ("Ulpiana"); the town for things outside it ("Peja"), which says more there.
+const area = (i: ItemBrief) => {
+  const parts = (i.location_label || i.neighborhood || 'Nearby').split(',').map((p) => p.trim());
+  return i.in_home_city === false ? parts[parts.length - 1] : parts[0];
+};
 type Quick = 'weekend' | 'cheap' | 'top';
 const QUICK: { key: Quick; label: string; icon: string }[] = [
   { key: 'weekend', label: 'This weekend', icon: 'calendar-outline' },
@@ -55,7 +64,9 @@ export default function ExploreScreen() {
   const nav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const tabNav = useNavigation<any>();
   const rt = useRealtime();
+  const homeCity = useHomeCity();
   const { user } = useAuth();
+  const clubMember = !!user?.club_member;
   const { c, scheme } = useTheme();
   const s = useStyles();
   const insets = useSafeAreaInsets();
@@ -64,6 +75,7 @@ export default function ExploreScreen() {
 
   const [items, setItems] = useState<ItemBrief[]>([]);
   const [weekendItems, setWeekendItems] = useState<ItemBrief[]>([]);
+  const [promos, setPromos] = useState<PromoSlide[]>([]);
   const [q, setQ] = useState('');
   const [category, setCategory] = useState<string | undefined>();
   const [quick, setQuick] = useState<Quick | null>(null);
@@ -74,9 +86,14 @@ export default function ExploreScreen() {
     setLoading(true);
     try {
       const filters = { q: q || undefined, category, ...(quick === 'weekend' ? { available_from: wk.from, available_to: wk.to } : {}) };
-      const [all, free] = await Promise.all([api.items(filters), api.items({ available_from: wk.from, available_to: wk.to })]);
+      const [all, free, promoted] = await Promise.all([
+        api.items(filters),
+        api.items({ available_from: wk.from, available_to: wk.to }),
+        api.promoted().catch(() => [] as PromoSlide[]), // the slideshow never blocks the feed
+      ]);
       setItems(all);
       setWeekendItems(free);
+      setPromos(promoted);
       setError(null);
     } catch (e: any) {
       setError(e.message);
@@ -102,11 +119,29 @@ export default function ExploreScreen() {
   if (quick === 'cheap') visible = visible.filter((i) => i.price_per_day < 15);
   if (quick === 'top') visible = visible.filter((i) => (i.rating_avg ?? 0) >= 4.5).sort((a, b) => (b.rating_avg ?? 0) - (a.rating_avg ?? 0));
   const filtering = !!q || !!category || !!quick;
-  const freeThisWeekend = photosFirst(weekendItems.filter(notMine)).slice(0, 10);
+  const inCity = (i: ItemBrief) => i.in_home_city !== false;
+  // Prishtina first, everything else after it.
+  const cityFirst = (list: ItemBrief[]) => [...list.filter(inCity), ...list.filter((i) => !inCity(i))];
+  visible = cityFirst(visible);
+  const local = visible.filter(inCity);
+  const elsewhere = visible.filter((i) => !inCity(i));
+  const freeThisWeekend = cityFirst(photosFirst(weekendItems.filter(notMine))).slice(0, 10);
   const open = (id: number) => nav.navigate('ItemDetail', { id });
-  const first = user?.name.split(' ')[0] ?? '';
+  const first = user?.name?.split(' ')[0] ?? '';
 
   return (
+    <>
+    <PromoPopup
+      user={user}
+      paused={filtering}
+      actions={{
+        onDeals: () => setQuick('cheap'),
+        onWeekend: () => setQuick('weekend'),
+        onPromote: () => tabNav.navigate('My things'),
+        onList: () => nav.navigate('ListingEditor', {}),
+        onClub: () => nav.navigate('Club'),
+      }}
+    />
     <ScrollView
       style={s.screen}
       contentContainerStyle={{ paddingTop: insets.top + 12, paddingBottom: bottom }}
@@ -116,11 +151,9 @@ export default function ExploreScreen() {
       {/* ---------- header ---------- */}
       <View style={s.topRow}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flexShrink: 1 }}>
-          <View style={s.logo}>
-            <Ionicons name="cube" size={18} color={c.onAccent} />
-          </View>
+          <LogoMark />
           <Text style={[s.wordmark, { flexShrink: 1 }]} numberOfLines={1}>
-            Rent a Thing
+            Rentify
           </Text>
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -131,6 +164,13 @@ export default function ExploreScreen() {
       <Text style={s.hello}>
         Hi {first}, what can your neighbours lend you today?
       </Text>
+      {clubMember && (
+        <Pressable onPress={() => nav.navigate('Club')} style={s.clubBanner} accessibilityRole="button">
+          <Ionicons name="ribbon" size={16} color={CLUB_GOLD} />
+          <Text style={s.clubBannerText}>Rent Club member · open the members’ chat</Text>
+          <Ionicons name="chevron-forward" size={14} color={CLUB_GOLD} />
+        </Pressable>
+      )}
 
       {/* ---------- search + quick filters ---------- */}
       <View style={s.searchCard}>
@@ -198,20 +238,14 @@ export default function ExploreScreen() {
         <>
           {!filtering && (
             <>
-              {/* ---------- earn banner ---------- */}
-              <Pressable onPress={() => tabNav.navigate('My things')} style={s.promo}>
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={s.promoTitle}>Your drill is bored.</Text>
-                  <Text style={s.promoText}>List things you rarely use and earn from your neighbours.</Text>
-                  <View style={s.promoBtn}>
-                    <Text style={s.promoBtnText}>List a thing</Text>
-                    <Ionicons name="arrow-forward" size={15} color={c.accent} />
-                  </View>
-                </View>
-                <View style={s.promoIcon}>
-                  <Ionicons name="cash-outline" size={34} color="#fff" />
-                </View>
-              </Pressable>
+              {/* ---------- slideshow: Black Friday, promoted listings, house ads ---------- */}
+              <PromoCarousel
+                promos={promos}
+                onOpenItem={open}
+                onDeals={() => setQuick('cheap')}
+                onPromote={() => tabNav.navigate('My things')}
+                onList={() => nav.navigate('ListingEditor', {})}
+              />
 
               {/* ---------- free this weekend ---------- */}
               {freeThisWeekend.length > 0 && (
@@ -227,11 +261,15 @@ export default function ExploreScreen() {
             </>
           )}
 
-          {/* ---------- feed ---------- */}
+          {/* ---------- feed: the home city first ---------- */}
           <View style={s.section}>
             <SectionHeader
-              title={filtering ? `${visible.length} ${visible.length === 1 ? 'thing' : 'things'} found` : 'Near you'}
-              subtitle={filtering ? undefined : `${visible.length} things to borrow around ${user?.neighborhood || 'you'}`}
+              title={filtering ? `${visible.length} ${visible.length === 1 ? 'thing' : 'things'} found` : `In ${homeCity}`}
+              subtitle={
+                filtering
+                  ? `${local.length} in ${homeCity}${elsewhere.length ? ` · ${elsewhere.length} elsewhere` : ''}`
+                  : `${local.length} ${local.length === 1 ? 'thing' : 'things'} to borrow in ${homeCity}`
+              }
             />
             {loading && visible.length === 0 ? (
               <ActivityIndicator color={c.text2} style={{ marginTop: 24 }} />
@@ -239,15 +277,35 @@ export default function ExploreScreen() {
               <Empty icon="search-outline" title="Nothing found" text="Try another word or category — or list your own thing." />
             ) : (
               <View style={{ paddingHorizontal: 20, gap: 18 }}>
-                {visible.map((i) => (
+                {local.length === 0 && (
+                  <Text style={s.meta}>Nothing in {homeCity} yet{filtering ? ' for this search' : ''}. Be the first to list something!</Text>
+                )}
+                {local.map((i) => (
                   <FeedCard key={i.id} item={i} onPress={() => open(i.id)} />
                 ))}
               </View>
             )}
           </View>
+
+          {/* ---------- outside the home city, with a warning ---------- */}
+          {elsewhere.length > 0 && (
+            <View style={s.section}>
+              <SectionHeader title={`Outside ${homeCity}`} subtitle={`${elsewhere.length} ${elsewhere.length === 1 ? 'thing' : 'things'} further away`} />
+              <View style={[s.outsideNote, { marginHorizontal: 20, marginBottom: 14 }]}>
+                <Ionicons name="warning" size={16} color={c.warning} />
+                <Text style={s.outsideNoteText}>These aren’t in {homeCity}. Check the pick-up place before you book.</Text>
+              </View>
+              <View style={{ paddingHorizontal: 20, gap: 18 }}>
+                {elsewhere.map((i) => (
+                  <FeedCard key={i.id} item={i} onPress={() => open(i.id)} />
+                ))}
+              </View>
+            </View>
+          )}
         </>
       )}
     </ScrollView>
+    </>
   );
 }
 
@@ -299,6 +357,7 @@ function FeedCard({ item, onPress }: { item: ItemBrief; onPress: () => void }) {
             <View style={{ position: 'absolute', top: 12, left: 12 }}>
               <CategoryPill cat={item.category} />
             </View>
+            {item.in_home_city === false && <OutsideChip />}
             {item.has_360 && (
               <View style={s.badge360}>
                 <Ionicons name="sync" size={12} color="#fff" />
@@ -311,9 +370,11 @@ function FeedCard({ item, onPress }: { item: ItemBrief; onPress: () => void }) {
               <Text style={s.feedTitle} numberOfLines={2}>
                 {item.title}
               </Text>
-              <View style={s.pricePill}>
-                <Text style={s.priceText}>{money(item.price_per_day)}</Text>
-                <Text style={s.priceDay}>/day</Text>
+              <View style={{ alignItems: 'flex-end', gap: 2 }}>
+                <View style={s.pricePill}>
+                  <Text style={s.priceText}>{money(item.price_per_day)}</Text>
+                  <Text style={s.priceDay}>/day</Text>
+                </View>
               </View>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -339,6 +400,24 @@ function FeedCard({ item, onPress }: { item: ItemBrief; onPress: () => void }) {
   );
 }
 
+/** Small warning: this item is not in the home city (Prishtina). */
+function OutsideChip({ inline }: { inline?: boolean }) {
+  const { c } = useTheme();
+  const homeCity = useHomeCity();
+  return (
+    <View
+      accessibilityLabel={`Not in ${homeCity}`}
+      style={[
+        { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: '#FFF4DB', alignSelf: 'flex-start' },
+        !inline && { position: 'absolute', left: 12, bottom: 12 },
+      ]}
+    >
+      <Ionicons name="warning" size={12} color={c.warning} />
+      <Text style={{ color: '#8A5A00', fontSize: 11, fontWeight: '800' }}>Not in {homeCity}</Text>
+    </View>
+  );
+}
+
 /** Medium card for the horizontal shelf. */
 function ShelfCard({ item, onPress }: { item: ItemBrief; onPress: () => void }) {
   const s = useStyles();
@@ -351,6 +430,7 @@ function ShelfCard({ item, onPress }: { item: ItemBrief; onPress: () => void }) 
             <Text style={s.shelfTitle} numberOfLines={1}>
               {item.title}
             </Text>
+            {item.in_home_city === false && <OutsideChip inline />}
             <Text style={s.shelfPrice}>
               {money(item.price_per_day)}
               <Text style={s.priceDay}> /day</Text>
@@ -375,7 +455,6 @@ const useStyles = makeStyles((c, scheme) => {
   return {
     screen: { flex: 1, backgroundColor: c.bg },
     topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20 },
-    logo: { width: 34, height: 34, borderRadius: 11, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
     wordmark: { fontSize: 22, fontWeight: '900', color: c.text, letterSpacing: -0.6 },
     hello: { ...type.callout, color: c.text2, paddingHorizontal: 20, marginTop: 10 },
     searchCard: {
@@ -400,21 +479,6 @@ const useStyles = makeStyles((c, scheme) => {
     cat: { width: 76, alignItems: 'center', gap: 7 },
     catTile: { width: 72, height: 72, borderRadius: 24, alignItems: 'center', justifyContent: 'center', borderWidth: 2.5, borderColor: 'transparent' },
     catText: { fontSize: 12.5, fontWeight: '600', color: c.text2 },
-    promo: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 14,
-      marginHorizontal: 20,
-      marginTop: 26,
-      padding: 18,
-      borderRadius: 26,
-      backgroundColor: c.accent,
-    },
-    promoTitle: { color: c.onAccent, fontSize: 20, fontWeight: '900', letterSpacing: -0.3 },
-    promoText: { color: c.onAccent, opacity: 0.92, fontSize: 14, lineHeight: 19 },
-    promoBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', backgroundColor: '#fff', borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, marginTop: 8 },
-    promoBtnText: { color: c.accent, fontWeight: '800', fontSize: 14 },
-    promoIcon: { width: 64, height: 64, borderRadius: 32, backgroundColor: 'rgba(255,255,255,0.22)', alignItems: 'center', justifyContent: 'center' },
     section: { marginTop: 30, gap: 14 },
     sectionHead: { paddingHorizontal: 20, gap: 2 },
     sectionTitle: { fontSize: 23, fontWeight: '900', color: c.text, letterSpacing: -0.5 },
@@ -432,5 +496,22 @@ const useStyles = makeStyles((c, scheme) => {
     shelfImg: { width: 164, height: 130, backgroundColor: c.imageBg },
     shelfTitle: { fontSize: 14, fontWeight: '800', color: c.text },
     shelfPrice: { fontSize: 15, fontWeight: '900', color: c.text },
+    clubBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      alignSelf: 'flex-start',
+      marginHorizontal: 20,
+      marginTop: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      borderRadius: 999,
+      backgroundColor: CLUB_GOLD + '1F',
+      borderWidth: 1,
+      borderColor: CLUB_GOLD + '55',
+    },
+    clubBannerText: { color: CLUB_GOLD, fontWeight: '800', fontSize: 13 },
+    outsideNote: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderRadius: 14, backgroundColor: c.warning + '18' },
+    outsideNoteText: { flex: 1, fontSize: 13, color: c.text2, fontWeight: '600' },
   };
 });

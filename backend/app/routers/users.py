@@ -24,11 +24,22 @@ def register(body: schemas.RegisterIn, db: Session = Depends(get_db)):
         email=body.email,
         password_hash=hash_password(body.password),
         neighborhood=body.neighborhood.strip(),
-        approval_status="pending" if services.get_setting(db, "approve_users") else "approved",
+        # Renters go straight in; lenders need an admin to approve them before they can list.
+        approval_status=services.lender_status_for_new_request(db) if body.lender else "none",
     )
     db.add(user)
     db.commit()
     return schemas.TokenOut(access_token=create_token(user.id), user=services.me_out(db, user))
+
+
+@router.post("/users/me/lender", response_model=schemas.MeOut)
+def apply_to_lend(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """A renter-only account asks to become a lender (or asks again after a rejection)."""
+    if user.approval_status in ("none", "rejected"):
+        user.approval_status = services.lender_status_for_new_request(db)
+        user.approval_note = ""
+        db.commit()
+    return services.me_out(db, user)
 
 
 @router.post("/auth/login", response_model=schemas.TokenOut)

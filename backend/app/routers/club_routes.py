@@ -30,7 +30,7 @@ class ClubMessageIn(BaseModel):
 
 @router.get("/club")
 def club_info(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return club.info(db, user, services.club_discount_percent(db))
+    return club.info(db, user)
 
 
 @router.get("/club/messages")

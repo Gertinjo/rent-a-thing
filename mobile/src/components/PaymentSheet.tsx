@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Linking, Modal, Pressable, Text, TextInput, View } from 'react-native';
+import { Linking, Modal, Pressable, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api, Booking, PaymentConfig } from '../api';
@@ -15,43 +15,93 @@ const groupExp = (v: string) => {
   return d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d;
 };
 
+/** Same as GET /payments/config in simulated mode, so the card form can show before (or without) that request. */
+const FALLBACK: PaymentConfig = {
+  mode: 'simulated',
+  currency: 'EUR',
+  demo: true,
+  test_cards: [
+    { number: '4242 4242 4242 4242', result: 'Payment succeeds' },
+    { number: '4000 0000 0000 0002', result: 'Card declined' },
+    { number: '4000 0000 0000 9995', result: 'Insufficient funds' },
+  ],
+};
+/** Last config the server sent; kept across openings so the sheet is instant the second time. */
+let cachedCfg: PaymentConfig | null = null;
+
+/** Fetches the payment config with a few retries (slow phone networks, the rate limiter). */
+async function loadConfig(): Promise<PaymentConfig> {
+  let last: unknown;
+  for (const wait of [0, 800, 2000]) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    try {
+      cachedCfg = await api.paymentConfig();
+      return cachedCfg;
+    } catch (e) {
+      last = e;
+    }
+  }
+  throw last;
+}
+
+type Card = { number: string; exp: string; cvc: string };
+
 /**
- * Card payment for a confirmed booking. DEMO ONLY:
+ * The card part of a payment, shared by bookings and promotions. DEMO ONLY:
  * - Stripe mode (server has an sk_test_ key): opens Stripe Checkout in test mode.
  * - Simulated mode (no key): a built-in card form that accepts Stripe's test card numbers.
+ * It never waits on the network: it shows the simulated form straight away and switches
+ * to Stripe only if the server says so.
+ *
+ * onStripe returns the Checkout URL to open (or undefined if the server is in simulated mode).
+ * resetKey: change it to clear the typed card (e.g. a different booking).
  */
-export default function PaymentSheet({ booking, onClose, onPaid }: { booking: Booking | null; onClose: () => void; onPaid: (b: Booking) => void }) {
+export function CardPayment({
+  amount,
+  resetKey,
+  onStripe,
+  onDemo,
+}: {
+  amount: number;
+  resetKey: unknown;
+  onStripe: () => Promise<string | undefined>;
+  onDemo: (card: Card) => Promise<void>;
+}) {
   const { c } = useTheme();
   const s = useStyles();
-  const insets = useSafeAreaInsets();
-  const [cfg, setCfg] = useState<PaymentConfig | null>(null);
+  const [cfg, setCfg] = useState<PaymentConfig>(cachedCfg ?? FALLBACK);
   const [number, setNumber] = useState('');
   const [exp, setExp] = useState('');
   const [cvc, setCvc] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  // Keyed on an id, not an object: Bookings reloads on every live notification, which used to wipe the typed card.
   useEffect(() => {
-    if (!booking) return;
     setNumber('');
     setExp('');
     setCvc('');
     setError('');
-    api.paymentConfig().then(setCfg).catch(() => setCfg(null));
-  }, [booking]);
-
-  if (!booking) return null;
+    setBusy(false);
+    let alive = true;
+    loadConfig()
+      .then((x) => alive && setCfg(x))
+      .catch(() => {}); // keep the cached/fallback form; the server still checks everything on Pay
+    return () => {
+      alive = false;
+    };
+  }, [resetKey]);
 
   const payStripe = async () => {
     setBusy(true);
     setError('');
     try {
-      const r = await api.startPayment(booking.id);
-      if (r.mode === 'stripe' && r.url) {
-        // Stripe hosts the card page; it sends the browser back to /?payment=success... (see usePaymentReturn)
-        if (isWeb) window.location.href = r.url;
-        else await Linking.openURL(r.url);
-      } else setCfg((x) => (x ? { ...x, mode: 'simulated' } : x));
+      const url = await onStripe();
+      if (url) {
+        // Stripe hosts the card page; it sends the browser back to /?payment=... or /?promo=... (see paymentReturn.ts)
+        if (isWeb) window.location.href = url;
+        else await Linking.openURL(url);
+      } else setCfg((x) => ({ ...x, mode: 'simulated' }));
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -63,8 +113,13 @@ export default function PaymentSheet({ booking, onClose, onPaid }: { booking: Bo
     setBusy(true);
     setError('');
     try {
-      onPaid(await api.demoPayment(booking.id, { number, exp, cvc }));
+      await onDemo({ number, exp, cvc });
     } catch (e: any) {
+      // The server has a Stripe test key but the config hadn't arrived yet: switch to the Stripe button.
+      if (/Stripe Checkout/.test(e.message ?? '')) {
+        setCfg((x) => ({ ...x, mode: 'stripe' }));
+        return;
+      }
       setError(e.message);
     } finally {
       setBusy(false);
@@ -79,85 +134,111 @@ export default function PaymentSheet({ booking, onClose, onPaid }: { booking: Bo
   };
 
   return (
+    <View style={{ gap: 12 }}>
+      {cfg.mode === 'stripe' ? (
+        <View style={{ gap: 12 }}>
+          <View style={s.stripeBox}>
+            <Ionicons name="lock-closed" size={18} color={c.text2} />
+            <Text style={[s.sub, { flex: 1 }]}>You’ll go to Stripe’s secure checkout (test mode), then come straight back here.</Text>
+          </View>
+          <Text style={s.hint}>Test card: 4242 4242 4242 4242 · any future date · any CVC</Text>
+          <Button title="Continue to Stripe" icon="card" onPress={payStripe} loading={busy} />
+        </View>
+      ) : (
+        <View style={{ gap: 10 }}>
+          <View style={s.cardField}>
+            <Ionicons name="card-outline" size={20} color={c.text2} />
+            <TextInput
+              value={number}
+              onChangeText={(v) => setNumber(groupCard(v))}
+              placeholder="Card number"
+              placeholderTextColor={c.text3}
+              keyboardType="number-pad"
+              autoComplete="off"
+              style={s.input}
+              accessibilityLabel="Card number"
+            />
+          </View>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <TextInput
+              value={exp}
+              onChangeText={(v) => setExp(groupExp(v))}
+              placeholder="MM/YY"
+              placeholderTextColor={c.text3}
+              keyboardType="number-pad"
+              style={[s.cardField, s.input, { flex: 1 }]}
+              accessibilityLabel="Expiry date"
+            />
+            <TextInput
+              value={cvc}
+              onChangeText={(v) => setCvc(v.replace(/\D/g, '').slice(0, 4))}
+              placeholder="CVC"
+              placeholderTextColor={c.text3}
+              keyboardType="number-pad"
+              secureTextEntry
+              style={[s.cardField, s.input, { flex: 1 }]}
+              accessibilityLabel="CVC"
+            />
+          </View>
+          <Text style={s.hint}>Tap a test card:</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {cfg.test_cards.map((t) => (
+              <Pressable key={t.number} onPress={() => fill(t.number)} style={s.chip}>
+                <Text style={s.chipText}>
+                  ••{t.number.slice(-4)} · {t.result}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Button title={`Pay ${money(amount)}`} icon="lock-closed" onPress={payDemo} loading={busy} disabled={number.replace(/\s/g, '').length < 15 || exp.length < 5 || cvc.length < 3} />
+        </View>
+      )}
+      {!!error && (
+        <View style={s.error}>
+          <Ionicons name="alert-circle" size={18} color={c.danger} />
+          <Text style={{ color: c.danger, flex: 1, fontWeight: '600' }}>{error}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+/** Small "DEMO PAYMENT" label shown above every card form. */
+export function DemoPaymentBadge() {
+  const { c } = useTheme();
+  const s = useStyles();
+  return (
+    <View style={s.demo}>
+      <Ionicons name="flask" size={14} color={c.warning} />
+      <Text style={s.demoText}>DEMO PAYMENT · no real money is charged</Text>
+    </View>
+  );
+}
+
+/** Card payment for a confirmed booking. */
+export default function PaymentSheet({ booking, onClose, onPaid }: { booking: Booking | null; onClose: () => void; onPaid: (b: Booking) => void }) {
+  const s = useStyles();
+  const insets = useSafeAreaInsets();
+  if (!booking) return null;
+  return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} />
       <View style={[s.sheet, { paddingBottom: insets.bottom + 20 }]}>
         <View style={s.grabber} />
-        <View style={s.demo}>
-          <Ionicons name="flask" size={14} color={c.warning} />
-          <Text style={s.demoText}>DEMO PAYMENT · no real money is charged</Text>
-        </View>
+        <DemoPaymentBadge />
         <Text style={s.title}>Pay {money(booking.total_price)}</Text>
         <Text style={s.sub} numberOfLines={1}>
           {booking.item.title} · {booking.days} day{booking.days > 1 ? 's' : ''}
         </Text>
-
-        {!cfg ? (
-          <ActivityIndicator color={c.text2} style={{ marginVertical: 30 }} />
-        ) : cfg.mode === 'stripe' ? (
-          <View style={{ gap: 12 }}>
-            <View style={s.stripeBox}>
-              <Ionicons name="lock-closed" size={18} color={c.text2} />
-              <Text style={[s.sub, { flex: 1 }]}>You’ll go to Stripe’s secure checkout (test mode), then come straight back here.</Text>
-            </View>
-            <Text style={s.hint}>Test card: 4242 4242 4242 4242 · any future date · any CVC</Text>
-            <Button title="Continue to Stripe" icon="card" onPress={payStripe} loading={busy} />
-          </View>
-        ) : (
-          <View style={{ gap: 10 }}>
-            <View style={s.cardField}>
-              <Ionicons name="card-outline" size={20} color={c.text2} />
-              <TextInput
-                value={number}
-                onChangeText={(v) => setNumber(groupCard(v))}
-                placeholder="Card number"
-                placeholderTextColor={c.text3}
-                keyboardType="number-pad"
-                autoComplete="off"
-                style={s.input}
-                accessibilityLabel="Card number"
-              />
-            </View>
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <TextInput
-                value={exp}
-                onChangeText={(v) => setExp(groupExp(v))}
-                placeholder="MM/YY"
-                placeholderTextColor={c.text3}
-                keyboardType="number-pad"
-                style={[s.cardField, s.input, { flex: 1 }]}
-                accessibilityLabel="Expiry date"
-              />
-              <TextInput
-                value={cvc}
-                onChangeText={(v) => setCvc(v.replace(/\D/g, '').slice(0, 4))}
-                placeholder="CVC"
-                placeholderTextColor={c.text3}
-                keyboardType="number-pad"
-                secureTextEntry
-                style={[s.cardField, s.input, { flex: 1 }]}
-                accessibilityLabel="CVC"
-              />
-            </View>
-            <Text style={s.hint}>Tap a test card:</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-              {cfg.test_cards.map((t) => (
-                <Pressable key={t.number} onPress={() => fill(t.number)} style={s.chip}>
-                  <Text style={s.chipText}>
-                    ••{t.number.slice(-4)} · {t.result}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-            <Button title={`Pay ${money(booking.total_price)}`} icon="lock-closed" onPress={payDemo} loading={busy} disabled={number.replace(/\s/g, '').length < 15 || exp.length < 5 || cvc.length < 3} />
-          </View>
-        )}
-        {!!error && (
-          <View style={s.error}>
-            <Ionicons name="alert-circle" size={18} color={c.danger} />
-            <Text style={{ color: c.danger, flex: 1, fontWeight: '600' }}>{error}</Text>
-          </View>
-        )}
+        <CardPayment
+          amount={booking.total_price}
+          resetKey={booking.id}
+          onStripe={async () => {
+            const r = await api.startPayment(booking.id);
+            return r.mode === 'stripe' ? r.url : undefined;
+          }}
+          onDemo={async (card) => onPaid(await api.demoPayment(booking.id, card))}
+        />
         <Text style={[s.hint, { textAlign: 'center' }]}>Cancel before the start date and you’re refunded automatically.</Text>
       </View>
     </Modal>

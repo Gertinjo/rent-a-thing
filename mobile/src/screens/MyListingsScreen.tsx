@@ -5,6 +5,8 @@ import React, { useCallback, useState } from 'react';
 import { FlatList, Image, Pressable, RefreshControl, Text, View } from 'react-native';
 
 import { api, Item, mediaUrl } from '../api';
+import { daysLeft } from '../components/PromoCarousel';
+import PromoteSheet from '../components/PromoteSheet';
 import { Button, Empty, GlassIconButton, LargeHeader, Rating, useTabBarSpace } from '../components/ui';
 import type { RootStackParamList } from '../navigation';
 import { Alert } from '../platform';
@@ -17,6 +19,7 @@ export default function MyListingsScreen() {
   const bottom = useTabBarSpace();
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
+  const [promoting, setPromoting] = useState<Item | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -52,7 +55,10 @@ export default function MyListingsScreen() {
         contentContainerStyle={{ paddingBottom: bottom }}
         ItemSeparatorComponent={() => <View style={s.sep} />}
         refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={c.text2} />}
-        renderItem={({ item }) => (
+        renderItem={({ item }) => {
+          const isLive = item.is_active && item.review_status === 'approved';
+          const promoDays = item.promo_until ? daysLeft(item.promo_until) : 0;
+          return (
           <Pressable onPress={() => nav.navigate('ItemDetail', { id: item.id })}>
             {({ pressed }) => (
               <View style={[s.row, pressed && { backgroundColor: c.fill }, !item.is_active && { opacity: 0.5 }]}>
@@ -66,7 +72,11 @@ export default function MyListingsScreen() {
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', marginTop: 2 }}>
                     <Rating avg={item.rating_avg} count={item.rating_count} size={12} />
-                    {item.review_status === 'pending' ? (
+                    {promoDays > 0 && isLive ? (
+                      <Text style={[s.tag, { color: c.accent }]}>Promoted · {promoDays}d left</Text>
+                    ) : item.promo_review === 'pending' && isLive ? (
+                      <Text style={[s.tag, { color: c.warning }]}>Promo in review</Text>
+                    ) : item.review_status === 'pending' ? (
                       <Text style={[s.tag, { color: c.warning }]}>Waiting for approval</Text>
                     ) : item.review_status === 'rejected' ? (
                       <Text style={[s.tag, { color: c.danger }]}>Changes needed</Text>
@@ -79,13 +89,23 @@ export default function MyListingsScreen() {
                     )}
                   </View>
                 </View>
+                {isLive && (
+                  <Pressable hitSlop={8} onPress={() => setPromoting(item)} accessibilityLabel={promoDays > 0 ? 'Manage promotion' : 'Promote'}>
+                    {({ pressed: p }) => (
+                      <View style={[s.promoBtn, promoDays > 0 && { backgroundColor: c.accent }, p && { opacity: 0.7 }]}>
+                        <Ionicons name={promoDays > 0 ? 'megaphone' : 'megaphone-outline'} size={17} color={promoDays > 0 ? c.onAccent : c.accent} />
+                      </View>
+                    )}
+                  </Pressable>
+                )}
                 <Pressable hitSlop={12} onPress={() => nav.navigate('ListingEditor', { id: item.id })} accessibilityLabel="Edit">
                   <Ionicons name="ellipsis-horizontal-circle-outline" size={26} color={c.text2} />
                 </Pressable>
               </View>
             )}
           </Pressable>
-        )}
+          );
+        }}
         ListEmptyComponent={
           loading ? undefined : (
             <Empty
@@ -96,6 +116,11 @@ export default function MyListingsScreen() {
             />
           )
         }
+      />
+      <PromoteSheet
+        item={promoting}
+        onClose={() => setPromoting(null)}
+        onChanged={(u) => setItems((list) => list.map((i) => (i.id === u.id ? u : i)))}
       />
     </View>
   );
@@ -109,4 +134,5 @@ const useStyles = makeStyles((c) => ({
   title: { ...type.headline, color: c.text },
   meta: { ...type.subhead, color: c.text2 },
   tag: { fontSize: 12, fontWeight: '600' },
+  promoBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: c.accentSoft },
 }));

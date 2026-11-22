@@ -1,7 +1,11 @@
-# Rent a Thing — session handoff (2026-11-21)
+# Rentify — session handoff (2026-11-21)
 
 48-hour hackathon project. Theme: neighbours rent out tools, cameras, tents, bikes by the day; backend
 handles availability calendars + booking requests; reviews after each rental. Extra: 360° view of items.
+
+## Name: Rentify (2026-11-22)
+- "Rent a Thing" was the concept; the product is now **Rentify**. All visible text was renamed (app, admin console, API title, Stripe line items, AI prompts, legal texts, docs); placeholder support email is support@rentify.app.
+- Kept on purpose (renaming would break things): folder names, `rentathing.db`, storage keys `rentathing.*` (would sign everyone out), bundle IDs `app.rentathing.mobile`, Expo slug/scheme, demo login emails `*@rentathing.app` (they're in the DB), logger names.
 
 ## Where things are
 - Project: `~/Documents/RentAThing/rent-a-thing/` — `backend/` (FastAPI + SQLite), `mobile/` (Expo SDK 58,
@@ -9,7 +13,7 @@ handles availability calendars + booking requests; reviews after each rental. Ex
 - DB: `backend/rentathing.db`. Media: `backend/media/` (demo renders in `media/_seed_cache/`).
 - Web admin console: `backend/admin_web/` (plain HTML/CSS/JS, served at `/admin`).
 
-## How to run (user's Mac; IP changes — check with `ipconfig getifaddr en0`, last seen 192.168.223.24)
+## How to run (user's Mac; IP changes — check with `ipconfig getifaddr en0`, last seen 192.168.178.46)
 - API + web app + admin: `cd backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`
   (use `python -m uvicorn`; venv was rebuilt after moving the folder).
 - Phone app in a browser (user has a **Samsung**, uses Chrome/Samsung Internet): `http://<ip>:8000`
@@ -60,7 +64,11 @@ handles availability calendars + booking requests; reviews after each rental. Ex
   admin setting `platform_fee_percent`, public `GET /config`). Renters pay the listed price.
 - Adding a product shows a lender-terms pop-up (`mobile/src/components/LenderTermsModal.tsx`, text in
   `lenderTerms()` in `mobile/src/content.ts`); the API refuses new listings without `terms_accepted: true`.
-- A "Renting Club" discount for frequent renters exists (added in another session; `club_discount_percent`).
+- Rent Club members **no longer get a price discount** (removed 2026-11-22 on request); the club keeps the badge and members' chat. Old bookings still show their past "Rent Club −€x".
+- **Special fee periods** (2026-11-22): admin page **Service fees** (`#/fees` in `backend/admin_web/admin.js`) sets the normal fee and dated periods (one-off or yearly, may wrap New Year) with presets for Black Friday / Summer / Christmas. Prices never change; only the owner's service fee does.
+  - Rule: the period that contains the rental **start date** applies; if several overlap the shortest wins (`services.fee_for`). The fee is fixed when the request is sent and its name stored in `bookings.fee_label`.
+  - Model `FeePeriod` (table `fee_periods`), admin routes `/admin/fee-periods` (+ `/quote?start=`), public `GET /config` → `fee_periods` (on now / upcoming). App shows them in the listing editor price hint and on owners' booking cards.
+  - Two example periods were created while testing: Black Friday 2026-11-27 at 3% and Summer (Jun 1 – Aug 31, yearly) at 15%. DB backup: `backend/backups/rentathing-before-fee-periods-*.db`.
 
 ## Design history and photos
 - The previous app design (iOS glass, original Explore grid) is saved in `design-archive/ios-glass-2026-11-21/`
@@ -78,12 +86,19 @@ handles availability calendars + booking requests; reviews after each rental. Ex
 - Previous designs: `design-archive/ios-glass-2026-11-21/` and `design-archive/explore-v2-2026-11-21/`.
 - Test listings without photos and duplicate Canon listings were deleted on request (DB backup kept in scratchpad).
 
+## Phone from anywhere: `./phone.sh` (2026-11-21)
+- Starts the API if needed, opens a Cloudflare quick tunnel to :8000 (https://<random>.trycloudflare.com, which serves the web app, the API, /admin and Socket.IO), then runs `EXPO_PUBLIC_API_URL=<tunnel> npx expo start --tunnel --port 8082` for Expo Go.
+- Why: `expo start --tunnel` alone only tunnels Metro. Without EXPO_PUBLIC_API_URL the app looked for the API at <expo-tunnel-host>:8000 and failed.
+- Tools: cloudflared (brew), @expo/ngrok (npm -g). The tunnel URL changes on every start.
+
 ## Payments: card (Stripe test/demo) or cash (2026-11-21, latest)
 - `app/payments.py`: mode "stripe" when `STRIPE_SECRET_KEY` starts with sk_test_ (Checkout Session, confirmed by retrieving the session on return; refund via `stripe.Refund.create`), otherwise "simulated" (`/bookings/{id}/pay/demo` accepts Stripe test card numbers). Live keys are refused.
 - Booking columns: payment_method, payment_status (unpaid/paid/refunded/cash_due/cash_received), stripe_session_id, stripe_payment_intent, paid_at. Old completed bookings are marked cash_received.
 - Routes in `routers/bookings.py`: `/payments/config`, `/bookings/{id}/pay`, `/pay/confirm`, `/pay/demo`, `/cash-received`, `/payments/webhook`. Cancel (user or admin) refunds paid cards.
 - App: card/cash choice in the request sheet (ItemDetail), `components/PaymentSheet.tsx`, `paymentReturn.ts` (handles `?payment=success&booking=&session_id=` after Stripe), payment line + Pay / Cash received buttons in Bookings.
 - Fixed: the request sheet showed a wrong "25% platform fee" to renters (the 10% fee comes out of the owner's payout). The web app now uses the server it was loaded from (it used to force port 8000, which broke Docker behind 80/443).
+- Fixed (2026-11-22): the card form sometimes never appeared. PaymentSheet waited on `GET /payments/config` and spun forever if it failed (slow phone network / rate limiter). It now shows the demo form at once (bundled test cards), fetches the config with retries in the background, and switches to Stripe only if the server says so. Typed card details no longer reset when Bookings reloads. Card bookings marked returned before payment (completed + unpaid) can still be paid.
+- 2026-11-22: real Stripe test key added to backend/.env and tested end to end (booking #24, €40, test card 4242 → paid, `pi_…`). Fixed: confirm returned 500 because stripe 17 objects aren't dicts (`.get()` raises) — now uses `.to_dict()` (webhook too). Stripe now returns the renter to the page they paid from (`Origin` header), so the Expo dev server (:8082) works too.
 - Stripe library: `stripe` (17.x) in requirements.txt. DB backup: `backend/backups/rentathing-before-payments-*.db`.
 
 ## Rent Club + ID verification (2026-11-21, latest)
@@ -104,6 +119,37 @@ handles availability calendars + booking requests; reviews after each rental. Ex
 - Docs: `docs/ARCHITECTURE.md` (mermaid diagrams).
 - Verified: 15 backend tests pass; a live two-user socket test on a DB copy covered messages, typing, read receipts, outsider 404, bad token refused, flood limit and the accept notification; checked in the browser.
 
+## Handover photos + pick-up/return reminders (2026-11-22)
+- **Handover photos**: on each confirmed booking card (Bookings tab) both people can add up to 6 pick-up and 6 return photos each, from the day before pick-up until 3 days after the last day. A photo can be removed by whoever added it within 15 minutes; after that it stays as a record. The other person gets a `handover_photos` notification.
+  - Backend: table `handover_photos`, routes `POST /bookings/{id}/handover/{pickup|return}` (multipart `files`) and `DELETE /bookings/{id}/handover/photos/{photo_id}` in `routers/bookings.py`; rules in `services.py` (`can_add_handover`, `HANDOVER_*`); files in `media/handover/<booking_id>/`. `BookingOut` has `handover_photos` + `can_add_handover`.
+  - App: `mobile/src/components/HandoverPhotos.tsx` (thumbnails, add tile, full-screen viewer), used in `BookingsScreen.tsx`.
+  - Admin console: Bookings shows a camera count next to the item; the booking panel shows the pick-up and return photos with who took them (click opens full size). Data: `handover_photos` on `GET /admin/bookings`.
+- **Reminders**: `app/reminders.py`, started by the `lifespan` in `main.py`, runs every 10 min. From 8:00 server time it sends a pick-up reminder (the day before, or on the day if the booking was confirmed late) and a return reminder (on the last day) to renter and owner. Each one is sent once per booking (table `booking_reminders`). Notification kinds `reminder_pickup` / `reminder_return`. `REMINDERS_DISABLED=1` turns it off (tests do).
+
+## Home slideshow + promotions (2026-11-22)
+- Explore's old "Your drill is bored." card is now a swipeable, auto-advancing slideshow (`mobile/src/components/PromoCarousel.tsx`):
+  Black Friday slide (shown 1 Nov to Cyber Monday, computed each year), promoted listings ("Sponsored"), "Get seen first" (promote), "Your shelf could pay rent" (list a thing).
+- Owners promote a live listing with a photo from My things (megaphone button, `PromoteSheet.tsx`): optional headline (80 chars), plan, live preview, then card payment. Max 3 at once.
+- **Paid by card** (same Stripe test mode / demo checkout as bookings): 3 days €15, 1 week €29, 2 weeks €49 (`payments.PROMO_PLANS`). Paid days add to time left; stopping early doesn't refund.
+- **Admin approval** (2026-11-22): order status unpaid → pending (paid, waiting) → approved (goes live, owner notified) | rejected (reason required, auto refund via Stripe test refund or simulated, owner notified). Only one waiting order per listing. Headline changes only happen through a new (reviewed) order. Admin: web console page "Promotions" (`#/promotions`, badge + Overview link) and the "Promos" tab in the app's Approvals screen. API: `GET /admin/promotions?status=`, `POST /admin/promotions/{id}` {decision, reason}; stats has `pending_promotions`. Old rows with status 'paid' are migrated to 'approved'.
+- Backend: `promotions` table (orders: unpaid/paid, Stripe session + intent), `items.promo_until` / `promo_tagline`. Routes: `GET /items/promoted`, `GET /items/promotion-plans`, `POST /items/{id}/promote` (creates order, returns Checkout URL or demo mode), `POST /items/{id}/promote/{pid}/confirm` (after Stripe redirect), `POST /items/{id}/promote/{pid}/demo`, `DELETE /items/{id}/promote`. The Stripe webhook handles `promotion_id` metadata too.
+- App: `CardPayment` (in PaymentSheet.tsx) is the shared card form for bookings and promotions; `paymentReturn.ts` handles `?promo=success&item=&promotion=&session_id=`.
+- Tests: `test_promotions_paid_then_approved`, `test_promotion_stripe_test_mode`. Tested end to end with Stripe test card 4242 (€15, Sam's Canon) + approval in the web console.
+
+## Promo pop-ups (2026-11-22)
+- `mobile/src/components/PromoPopup.tsx`, mounted on Explore. House ads in rotation: Black Friday (in season, every other time), Promote a listing, Rent Club progress (non-members), This weekend, List a thing.
+- Frequency: never on someone's first visit, max once per 20 hours, after 8 s on Explore, not while searching/filtering. State in storage key `rentify.promoPopup` (per device/browser).
+- Testing: open the web app with `?popup=1` to show one at once (still rotates).
+
+## Discount codes (2026-11-22)
+- Renters type a code in the "Request to rent" sheet ("Have a discount code?"; when a featured code is live it says "Black Friday: use BLACKFRIDAY for 20% off" with one-tap apply). `components/DiscountCodeField.tsx`.
+- **Rentify pays the discount**: renter's `total_price` is reduced; `platform_fee` and `owner_payout` are worked out on the full price, so owners get their full payout. Booking columns `discount_code`, `discount_amount`. Card payments charge the reduced total; refunds refund what was paid.
+- Rules (`app/discounts.py`): % off, optional € cap per booking, minimum rental, first/last day (date the booking is made), total uses, once per person. Uses count only pending/accepted/completed bookings (declined/cancelled give the use back). Used codes can't be renamed or deleted, only paused.
+- Admin: web console "Discount codes" page (presets: Black Friday week, Cyber Monday, Welcome 10%; live example; "Show in the app's Black Friday ads" = featured, one at a time). Overview "Platform fees" shows discounts given; booking drawer shows the code. API: `GET|POST /admin/discount-codes`, `PUT|DELETE /admin/discount-codes/{id}`; public `POST /discounts/check`, `GET /discounts/featured`.
+- The Black Friday slide and pop-up show the featured code. Created live: **BLACKFRIDAY** 20% off, max €10, 22–30 Nov 2026, once per person, featured.
+- Fixed: the app's Black Friday date used "4th Friday of November"; now the day after the 4th Thursday (same as the console). Admin assets bumped to `admin.js?v=12`, `admin.css?v=8`.
+- Test: `test_discount_codes`.
+
 ## Key files
 - Backend: `app/main.py` (routers, `/admin` redirect, static mounts), `app/models.py`, `app/schemas.py`,
   `app/services.py` (availability, ratings, location privacy, settings), `app/database.py` (+ `upgrade_schema()`
@@ -122,3 +168,23 @@ handles availability calendars + booking requests; reviews after each rental. Ex
 - Add the real Anthropic key and try both AI features live.
 - Ideas: push notifications for requests, in-app chat per booking, map view of nearby items, payments in
   test mode, lint setup (`npx expo lint` not configured yet).
+
+## Renter vs lender accounts (2026-11-22)
+- Sign-up asks "I just want to rent" (default) or "I want to rent and lend" (`RegisterIn.lender`).
+- `User.approval_status` now means **lender approval**: `none` = renter only, `pending` / `approved` / `rejected`.
+  Renters are never blocked by admin approval; booking only needs the ID check (`require_id`).
+- Creating a listing needs an approved lender (`services.can_lend`); renters apply later via `POST /users/me/lender`
+  (Profile → Lending, or tapping "List a thing", which shows `LenderGate` in ListingEditorScreen).
+- The admin setting `approve_users` now reads "Approve new lenders"; when off, lender applications are approved at once.
+
+## Demo data moved to Kosovo (2026-11-22)
+- `backend/seed.py`: demo users live in Prishtina neighbourhoods; 5 demo listings in Prishtina, the tent in Peja and
+  the projector in Prizren (outside the home city, so the "outside Prishtina" note shows). `seed.py --upgrade` moves
+  old San Francisco demo listings in place. Applied to the live DB; backup in `backend/backups/rentathing-before-kosovo-*.db`.
+
+## Logo and icons (2026-11-22)
+- The logo is the Explore header mark: terracotta (#E2572B) rounded square with the white Ionicons "cube".
+  In the app it's `mobile/src/components/LogoMark.tsx` (follows the chosen accent colour), used on Explore and Login.
+- Generated from that glyph: `mobile/assets/` icon, favicon, splash and Android adaptive layers,
+  `mobile/public/apple-touch-icon.png`, `backend/admin_web/favicon.png` + `apple-touch-icon.png` (admin sidebar too).
+  Old icons were the Expo defaults. app.json: splash + Android background set, web theme colour now cream (was green).

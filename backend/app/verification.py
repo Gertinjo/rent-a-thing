@@ -19,7 +19,7 @@ from fastapi import HTTPException, UploadFile
 
 from .database import PRIVATE_DIR
 from .media import IMAGE_EXTS, read_limited
-from .models import ID_DOC_TYPES, IdStatus, User
+from .models import AUTO_VERIFIED_EMAILS, ID_DOC_TYPES, IdStatus, User
 
 ID_DIR = PRIVATE_DIR / "ids"
 MAX_WIDTH = 1600
@@ -71,6 +71,22 @@ def decide(user: User, verified: bool, note: str = "") -> None:
     user.id_note = "" if verified else (note or "The photos weren’t clear enough to verify.")
     user.id_verified_at = datetime.utcnow() if verified else None
     delete_files(user)
+
+
+def is_auto_verified(user: User) -> bool:
+    """Admins (trusted staff) and the demo account are verified automatically, without documents."""
+    return user.is_admin or user.email in AUTO_VERIFIED_EMAILS
+
+
+def auto_verify(user: User) -> bool:
+    """Returns True if it changed the user."""
+    if not is_auto_verified(user) or user.id_status == IdStatus.VERIFIED:
+        return False
+    user.id_status = IdStatus.VERIFIED
+    user.id_note = ""
+    user.id_verified_at = datetime.utcnow()
+    delete_files(user)
+    return True
 
 
 def file_path(user: User, which: str) -> Path | None:

@@ -96,7 +96,7 @@ export default function ClubScreen({ navigation }: ScreenProps<'Club'>) {
       <View style={{ flex: 1, gap: 2 }}>
         <Text style={s.heroTitle}>Rent Club</Text>
         <Text style={s.heroSub}>
-          {info.member_count} member{info.member_count === 1 ? '' : 's'} · {info.discount_percent}% off every booking
+          {info.member_count} member{info.member_count === 1 ? '' : 's'} · badge and members’ chat
         </Text>
       </View>
       <Pressable onPress={() => setShowMembers((v) => !v)} hitSlop={8} accessibilityLabel="Show members">
@@ -141,7 +141,6 @@ export default function ClubScreen({ navigation }: ScreenProps<'Club'>) {
             <Text style={s.cardTitle}>Members get</Text>
             {[
               ['ribbon', 'The gold Rent Club badge on your profile, bookings and chats'],
-              ['pricetag', `${info.discount_percent}% off every booking`],
               ['chatbubbles', 'The members’ chat: tips, swaps and first dibs on new listings'],
             ].map(([icon, label]) => (
               <View key={label} style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>

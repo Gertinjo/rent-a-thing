@@ -1,15 +1,16 @@
 from datetime import date, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import chat, payments, schemas, services
-from ..database import get_db
+from .. import chat, discounts, payments, schemas, services
+from ..database import MEDIA_DIR, get_db
 from ..deps import get_current_user
-from ..models import Booking, BookingStatus, Item, Notification, Review, User
+from ..media import save_image
+from ..models import Booking, BookingStatus, HandoverPhoto, Item, Notification, Promotion, Review, User
 from ..realtime import push_notification
 
 router = APIRouter(tags=["bookings & reviews"])
@@ -42,13 +43,6 @@ def request_booking(
     item = db.get(Item, body.item_id)
     if not item or not item.is_active or item.owner.is_suspended or item.review_status != "approved":
         raise HTTPException(404, "Item not found")
-    if user.approval_status != "approved":
-        raise HTTPException(
-            403,
-            "Your account is still being reviewed. You can book as soon as it’s approved."
-            if user.approval_status == "pending"
-            else "Your account wasn’t approved, so you can’t book yet. Contact support for help.",
-        )
     if services.id_required(db, user):
         raise HTTPException(403, services.ID_BLOCK_MESSAGE.get(user.id_status, services.ID_BLOCK_MESSAGE["none"]))
     if item.owner_id == user.id:
@@ -72,7 +66,10 @@ def request_booking(
     if dup:
         raise HTTPException(409, "You already have a pending request for those days")
     subtotal = round(days * item.price_per_day, 2)
-    discount, total_price = services.apply_club_discount(subtotal, user, db)
+    code, off = (None, 0.0)
+    if body.discount_code.strip():
+        code, off = discounts.check(db, body.discount_code, user, subtotal)
+    total_price = round(subtotal - off, 2)
     b = Booking(
         item_id=item.id,
         renter_id=user.id,
@@ -85,16 +82,42 @@ def request_booking(
         payment_method=body.payment_method,
         payment_status=payments.initial_status(body.payment_method),
     )
-    # Apply platform fee (admin keeps a %, owner gets the rest).
-    fee_percent = float(services.get_setting_str(db, "platform_fee_percent"))
-    b.platform_fee = round(total_price * fee_percent / 100, 2)
-    b.owner_payout = round(total_price - b.platform_fee, 2)
+    # Service fee (Rentify keeps a %, the owner gets the rest). Special periods change the % by start date.
+    # Fee and payout are worked out on the full price: a discount code is paid by Rentify, not the owner.
+    fee_percent, b.fee_label = services.fee_for(db, body.start_date)
+    b.platform_fee = round(subtotal * fee_percent / 100, 2)
+    b.owner_payout = round(subtotal - b.platform_fee, 2)
+    if code:
+        b.discount_code, b.discount_amount = code.code, off
     db.add(b)
     db.commit()
     db.refresh(b)
     _tell(db, item.owner_id, "booking_request", f"New request from {_first(user.name)}",
           f"{item.title} · {b.start_date:%b %d} – {b.end_date:%b %d} · {'card' if b.payment_method == 'card' else 'cash on pick-up'}", b)
     return services.booking_out(db, b, user)
+
+
+@router.post("/discounts/check", response_model=schemas.DiscountCheckOut, tags=["discounts"])
+def check_discount(body: schemas.DiscountCheckIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Preview a code in the request sheet before sending the booking."""
+    item = db.get(Item, body.item_id)
+    if not item:
+        raise HTTPException(404, "Item not found")
+    days = (body.end_date - body.start_date).days + 1
+    subtotal = round(days * item.price_per_day, 2)
+    d, off = discounts.check(db, body.code, user, subtotal)
+    return schemas.DiscountCheckOut(code=d.code, label=d.label, percent_off=d.percent_off, subtotal=subtotal,
+                                    discount=off, total=round(subtotal - off, 2))
+
+
+@router.get("/discounts/featured", response_model=schemas.FeaturedDiscountOut | None, tags=["discounts"])
+def featured_discount(db: Session = Depends(get_db)):
+    """The code to show in the Black Friday ads (or null)."""
+    d = discounts.featured(db)
+    if not d:
+        return None
+    return schemas.FeaturedDiscountOut(code=d.code, label=d.label, percent_off=d.percent_off, max_off=d.max_off,
+                                       starts_on=d.starts_on, ends_on=d.ends_on, live=discounts.is_live(d))
 
 
 @router.get("/bookings", response_model=list[schemas.BookingOut])
@@ -236,6 +259,54 @@ def leave_review(body: schemas.ReviewCreate, user: User = Depends(get_current_us
 
 
 # ---------------------------------------------------------------------------
+# handover photos: both sides photograph the item at pick-up and at return
+# ---------------------------------------------------------------------------
+
+
+@router.post("/bookings/{booking_id}/handover/{stage}", response_model=schemas.BookingOut)
+def add_handover_photos(
+    booking_id: int,
+    stage: Literal["pickup", "return"],
+    files: list[UploadFile] = File(..., description="1-6 photos of the item's condition"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    b = _get_booking(db, booking_id, user)
+    if not services.can_add_handover(b):
+        raise HTTPException(400, "Handover photos can be added from the day before pick-up until 3 days after the return.")
+    if not files:
+        raise HTTPException(400, "Add at least one photo.")
+    mine = sum(1 for p in b.handover_photos if p.stage == stage and p.uploader_id == user.id)
+    room = services.HANDOVER_MAX_PER_STAGE - mine
+    if room <= 0 or len(files) > room:
+        raise HTTPException(400, f"You can add up to {services.HANDOVER_MAX_PER_STAGE} {'pick-up' if stage == 'pickup' else 'return'} photos"
+                                 + (f" ({room} more)." if room > 0 else "."))
+    for f in files:
+        b.handover_photos.append(HandoverPhoto(stage=stage, uploader_id=user.id, url=save_image(f, f"handover/{b.id}")))
+    db.commit()
+    other = b.item.owner_id if user.id == b.renter_id else b.renter_id
+    n = len(files)
+    _tell(db, other, "handover_photos", f"{_first(user.name)} added {n} {'pick-up' if stage == 'pickup' else 'return'} photo{'s' if n > 1 else ''}",
+          f"{b.item.title} · a record of its condition", b)
+    return services.booking_out(db, b, user)
+
+
+@router.delete("/bookings/{booking_id}/handover/photos/{photo_id}", response_model=schemas.BookingOut)
+def delete_handover_photo(booking_id: int, photo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Only your own photo, and only shortly after adding it (after that it stays as a record)."""
+    b = _get_booking(db, booking_id, user)
+    p = next((p for p in b.handover_photos if p.id == photo_id), None)
+    if not p:
+        raise HTTPException(404, "Photo not found")
+    if not services.handover_photo_out(p, user).can_delete:
+        raise HTTPException(403, f"Photos can only be removed by whoever added them, within {services.HANDOVER_DELETE_MINUTES} minutes.")
+    b.handover_photos.remove(p)
+    db.commit()
+    (MEDIA_DIR / p.url.removeprefix("/media/")).unlink(missing_ok=True)
+    return services.booking_out(db, b, user)
+
+
+# ---------------------------------------------------------------------------
 # payments (card via Stripe test mode / demo checkout, or cash) — see app/payments.py
 # ---------------------------------------------------------------------------
 
@@ -271,7 +342,11 @@ def payment_config():
 def start_payment(booking_id: int, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Card payment. Stripe mode: returns a Checkout URL (test mode). Simulated mode: use /pay/demo."""
     b = _renter_booking(db, booking_id, user)
-    out = payments.start_checkout(b, str(request.base_url))
+    # Send Stripe back to the page the renter paid from (the browser sets Origin; scripts can't fake it).
+    # Matters for the Expo dev server (:8082 calling the API on :8000) and HTTPS tunnels; otherwise use our own URL.
+    origin = request.headers.get("origin", "")
+    base = origin if origin.startswith(("http://", "https://")) else str(request.base_url)
+    out = payments.start_checkout(b, base)
     db.commit()
     return out
 
@@ -314,10 +389,16 @@ def cash_received(booking_id: int, user: User = Depends(get_current_user), db: S
 @router.post("/payments/webhook", tags=["payments"], include_in_schema=False)
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     """Optional (needs a public URL, e.g. `stripe listen --forward-to localhost:8000/payments/webhook`)."""
-    kind, booking_id, intent = payments.handle_webhook(await request.body(), request.headers.get("stripe-signature"))
-    if kind == "checkout.session.completed" and booking_id:
+    kind, meta, intent = payments.handle_webhook(await request.body(), request.headers.get("stripe-signature"))
+    if kind != "checkout.session.completed":
+        return {"received": True}
+    if booking_id := payments.meta_id(meta, "booking_id"):
         b = db.get(Booking, booking_id)
         if b and b.payment_method == payments.CARD and payments._mark_paid(b, intent):
             db.commit()
             _paid(db, b)
+    if promo_id := payments.meta_id(meta, "promotion_id"):
+        promo = db.get(Promotion, promo_id)
+        if promo and services.mark_promotion_paid(promo, intent):
+            db.commit()
     return {"received": True}

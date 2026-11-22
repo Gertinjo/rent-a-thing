@@ -188,7 +188,7 @@ export default function ChatScreen({ route, navigation }: ScreenProps<'Chat'>) {
           ListFooterComponent={
             <View style={s.safety}>
               <Ionicons name="shield-checkmark-outline" size={16} color={c.text2} />
-              <Text style={s.safetyText}>Keep payments and personal details in Rent a Thing. We’ll never ask for your password.</Text>
+              <Text style={s.safetyText}>Keep payments and personal details in Rentify. We’ll never ask for your password.</Text>
             </View>
           }
           ListEmptyComponent={

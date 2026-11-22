@@ -29,8 +29,13 @@ const KIND_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
   club_joined: 'ribbon',
   payment_received: 'card',
   payment_refunded: 'return-up-back',
+  handover_photos: 'camera',
+  reminder_pickup: 'alarm',
+  reminder_return: 'return-down-back',
   id_verified: 'shield-checkmark',
   id_rejected: 'alert-circle',
+  promotion_approved: 'megaphone',
+  promotion_rejected: 'return-up-back',
 };
 
 /* ------------------------------------------------------------------ Messages */
@@ -142,6 +147,7 @@ export function NotificationsScreen({ navigation }: ScreenProps<'Notifications'>
   const open = (n: AppNotification) => {
     if (n.kind === 'club_joined') navigation.navigate('Club');
     else if (n.kind.startsWith('id_')) navigation.navigate('VerifyId');
+    else if (n.kind.startsWith('promotion_')) navigation.navigate('Tabs', { screen: 'My things' } as never);
     else if (n.booking_id && n.kind === 'message') navigation.navigate('Chat', { bookingId: n.booking_id });
     else if (n.booking_id) navigation.navigate('Tabs', { screen: 'Bookings' } as never);
     else if (n.item_id) navigation.navigate('ItemDetail', { id: n.item_id });

@@ -85,7 +85,7 @@ export default function LocationPicker({ value, onChange }: { value: Place | nul
         <TextInput
           value={q}
           onChangeText={setQ}
-          placeholder="Street and area, e.g. Valencia St, Mission"
+          placeholder="Street and area, e.g. Rr. Pashko Vasa, Qyteza Pejton"
           placeholderTextColor={c.text3}
           selectionColor={c.accent}
           style={s.input}

@@ -1,4 +1,4 @@
-# Architecture — Rent a Thing
+# Architecture — Rentify
 
 GitHub, VS Code (with a Mermaid extension) and most Markdown viewers render the diagrams below.
 

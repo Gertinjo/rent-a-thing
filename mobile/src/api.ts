@@ -12,10 +12,10 @@ function resolveBaseUrl(): string {
   if (fromEnv) return fromEnv.replace(/\/$/, '');
   // In a browser (laptop or a phone on the same Wi-Fi) the API lives on the same machine that served the page.
   if (Platform.OS === 'web' && typeof window !== 'undefined') {
-    // Served by the FastAPI server itself (any port, incl. 80/443 in production): same address.
-    // From the Expo web dev server (8081/19006): the API runs on port 8000 of the same machine.
-    const { protocol, hostname, port, origin } = window.location;
-    return port === '8081' || port === '19006' ? `${protocol}//${hostname}:8000` : origin;
+    // Expo web dev server (`npx expo start --web`, any port): the API runs on port 8000 of the same machine.
+    // Built app (`expo export`) served by FastAPI, on any port incl. 80/443 in Docker: same address.
+    const { protocol, hostname, origin } = window.location;
+    return __DEV__ ? `${protocol}//${hostname}:8000` : origin;
   }
   const hostUri = Constants.expoConfig?.hostUri ?? '';
   const host = hostUri.split(':')[0];
@@ -61,10 +61,12 @@ export interface User extends UserBrief {
   rating_avg: number | null;
   rating_count: number;
 }
+/** Lender approval: 'none' = renter-only account (never asked to lend). */
+export type LenderStatus = 'none' | ApprovalStatus;
 export interface Me extends User {
   email: string;
   is_admin: boolean;
-  approval_status: ApprovalStatus;
+  approval_status: LenderStatus;
   approval_note: string;
   listings_count: number;
   rentals_count: number;
@@ -91,7 +93,6 @@ export interface ClubInfo {
   can_chat: boolean;
   rentals: number;
   needed: number;
-  discount_percent: number;
   member_count: number;
   members: { id: number; name: string; avatar_url: string | null; rentals: number }[];
   unread: number;
@@ -109,6 +110,7 @@ export interface Photo {
 }
 export interface Item {
   id: number;
+  in_home_city?: boolean;
   title: string;
   description: string;
   category: Category;
@@ -127,6 +129,12 @@ export interface Item {
   location: ItemLocation | null;
   review_status: ApprovalStatus;
   review_note: string;
+  /** set while the listing is promoted in the home slideshow */
+  promo_until?: string | null;
+  promo_tagline?: string;
+  /** owner only: a paid promotion waiting for an admin, or the latest one was rejected (and refunded) */
+  promo_review?: 'none' | 'pending' | 'rejected';
+  promo_review_note?: string;
 }
 export interface ItemBrief {
   id: number;
@@ -141,6 +149,43 @@ export interface ItemBrief {
   owner_id: number;
   owner_name: string;
   location_label: string;
+  /** inside the app's home city (Prishtina) */
+  in_home_city?: boolean;
+}
+export interface PromoPlans {
+  mode: 'stripe' | 'simulated';
+  currency: string;
+  plans: { days: number; price: number }[];
+}
+export interface PromoCheckout {
+  promotion_id: number;
+  amount: number;
+  mode: 'stripe' | 'simulated';
+  url?: string;
+  session_id?: string;
+}
+export interface DiscountCheck {
+  code: string;
+  label: string;
+  percent_off: number;
+  subtotal: number;
+  discount: number;
+  total: number;
+}
+/** The code the Black Friday ads show (admin marks it "show in ads"). live = usable today. */
+export interface FeaturedDiscount {
+  code: string;
+  label: string;
+  percent_off: number;
+  max_off: number;
+  starts_on: string;
+  ends_on: string;
+  live: boolean;
+}
+/** A promoted listing in the home slideshow. */
+export interface PromoSlide extends ItemBrief {
+  tagline: string;
+  promo_until: string;
 }
 export interface CalendarRange {
   start_date: string;
@@ -168,7 +213,11 @@ export interface Booking {
   total_price: number;
   platform_fee?: number;
   owner_payout?: number;
-  club_discount?: number;
+  club_discount?: number; // only on old bookings, from when the club had a price discount
+  /** discount code used; Rentify pays it, total_price is already reduced */
+  discount_code?: string;
+  discount_amount?: number;
+  fee_label?: string; // special fee period that set platform_fee, e.g. "Black Friday"
   status: BookingStatus;
   message: string;
   created_at: string;
@@ -178,6 +227,33 @@ export interface Booking {
   paid_at: string | null;
   can_review: boolean;
   reviewed_by_me: boolean;
+  handover_photos?: HandoverPhoto[]; // condition photos at pick-up and return
+  can_add_handover?: boolean;
+}
+export type HandoverStage = 'pickup' | 'return';
+export interface HandoverPhoto {
+  id: number;
+  stage: HandoverStage;
+  url: string;
+  uploader_id: number;
+  created_at: string;
+  can_delete: boolean;
+}
+export interface FeePeriod {
+  name: string;
+  start_date: string;
+  end_date: string;
+  fee_percent: number;
+  yearly: boolean;
+  active: boolean;
+}
+export interface AppConfig {
+  platform_fee_percent: number;
+  /** special service-fee periods that are on now or coming up, soonest first */
+  fee_periods: FeePeriod[];
+  currency: string;
+  currency_symbol: string;
+  home_city: { name: string; lat: number; lng: number; radius_km: number };
 }
 export type PaymentMethod = 'card' | 'cash';
 export type PaymentStatus = 'unpaid' | 'paid' | 'refunded' | 'cash_due' | 'cash_received';
@@ -291,7 +367,12 @@ async function request<T>(method: string, path: string, body?: unknown, timeoutM
     clearTimeout(timer);
   }
   if (res.status === 204) return undefined as T;
-  const data = await res.json().catch(() => ({}));
+  const isJson = (res.headers.get('content-type') || '').includes('application/json');
+  if (!isJson && res.ok) {
+    // e.g. a web page instead of the API: never hand that to the screens as data
+    throw new ApiError(0, `The server at ${API_URL} didn’t answer like the Rentify API. Is the backend running on port 8000?`);
+  }
+  const data = isJson ? await res.json().catch(() => ({})) : {};
   if (!res.ok) {
     const detail = (data as any)?.detail;
     const msg = Array.isArray(detail) ? detail.map((d: any) => d.msg).join('\n') : detail || `Error ${res.status}`;
@@ -322,8 +403,10 @@ const qs = (params: Record<string, string | number | boolean | undefined | null>
 
 // ---------- endpoints ----------
 export const api = {
-  register: (b: { name: string; email: string; password: string; neighborhood: string }) =>
+  register: (b: { name: string; email: string; password: string; neighborhood: string; lender: boolean }) =>
     request<{ access_token: string; user: Me }>('POST', '/auth/register', b),
+  /** A renter-only account asks an admin to let it list things too. */
+  applyToLend: () => request<Me>('POST', '/users/me/lender'),
   login: (email: string, password: string) =>
     request<{ access_token: string; user: Me }>('POST', '/auth/login', { email, password }),
   me: () => request<Me>('GET', '/users/me'),
@@ -344,8 +427,17 @@ export const api = {
   items: (p: { q?: string; category?: string; has_360?: boolean; available_from?: string; available_to?: string } = {}) =>
     request<ItemBrief[]>('GET', `/items${qs(p)}`),
   myItems: () => request<Item[]>('GET', '/items/mine'),
+  promoted: () => request<PromoSlide[]>('GET', '/items/promoted'),
+  promotionPlans: () => request<PromoPlans>('GET', '/items/promotion-plans'),
+  /** Creates an unpaid promotion order and starts the card payment (Stripe Checkout URL in stripe mode). */
+  promote: (id: number, b: { tagline: string; days: number }) => request<PromoCheckout>('POST', `/items/${id}/promote`, b),
+  confirmPromotion: (id: number, promotionId: number, session_id?: string) =>
+    request<Item>('POST', `/items/${id}/promote/${promotionId}/confirm`, { session_id }),
+  demoPayPromotion: (id: number, promotionId: number, card: { number: string; exp: string; cvc: string }) =>
+    request<Item>('POST', `/items/${id}/promote/${promotionId}/demo`, card),
+  stopPromotion: (id: number) => request<Item>('DELETE', `/items/${id}/promote`),
   item: (id: number) => request<Item>('GET', `/items/${id}`),
-  config: () => request<{ platform_fee_percent: number; currency: string; currency_symbol: string }>('GET', '/config'),
+  config: () => request<AppConfig>('GET', '/config'),
   createItem: (b: { title: string; description: string; category: Category; price_per_day: number; deposit: number; location?: Place | null; terms_accepted?: boolean }) =>
     request<Item>('POST', '/items', b),
   updateItem: (id: number, b: Partial<Omit<Item, 'location'>> & { location?: Place | null }) => request<Item>('PATCH', `/items/${id}`, b),
@@ -386,7 +478,9 @@ export const api = {
   itemReviews: (id: number) => request<Review[]>('GET', `/items/${id}/reviews`),
 
   bookings: (role: 'renter' | 'owner' | 'all' = 'all') => request<Booking[]>('GET', `/bookings?role=${role}`),
-  requestBooking: (b: { item_id: number; start_date: string; end_date: string; message: string; payment_method: PaymentMethod }) =>
+  checkDiscount: (b: { item_id: number; start_date: string; end_date: string; code: string }) => request<DiscountCheck>('POST', '/discounts/check', b),
+  featuredDiscount: () => request<FeaturedDiscount | null>('GET', '/discounts/featured'),
+  requestBooking: (b: { item_id: number; start_date: string; end_date: string; message: string; payment_method: PaymentMethod; discount_code?: string }) =>
     request<Booking>('POST', '/bookings', b),
   paymentConfig: () => request<PaymentConfig>('GET', '/payments/config'),
   startPayment: (id: number) => request<{ mode: 'stripe' | 'simulated'; url?: string; session_id?: string }>('POST', `/bookings/${id}/pay`),
@@ -396,6 +490,12 @@ export const api = {
   bookingAction: (id: number, action: 'accept' | 'decline' | 'cancel' | 'complete') =>
     request<Booking>('POST', `/bookings/${id}/${action}`),
   review: (b: { booking_id: number; rating: number; comment: string }) => request<Review>('POST', '/reviews', b),
+  addHandoverPhotos: async (id: number, stage: HandoverStage, files: LocalFile[]) => {
+    const fd = new FormData();
+    for (const [i, f] of files.entries()) await appendFile(fd, 'files', f, `handover${i}.jpg`, 'image/jpeg');
+    return request<Booking>('POST', `/bookings/${id}/handover/${stage}`, fd, 120000);
+  },
+  deleteHandoverPhoto: (id: number, photoId: number) => request<Booking>('DELETE', `/bookings/${id}/handover/photos/${photoId}`),
 
   // ----- chat + notifications (live updates come over Socket.IO, see src/realtime.tsx) -----
   chats: () => request<ChatThread[]>('GET', '/chats'),
@@ -449,6 +549,7 @@ export interface AdminStats {
   open_messages: number;
   pending_users: number;
   pending_listings: number;
+  pending_promotions?: number;
   bookings_per_day: { date: string; count: number }[];
   recent_actions: AdminAction[];
 }
@@ -462,7 +563,7 @@ export interface AdminUser {
   is_admin: boolean;
   is_suspended: boolean;
   suspended_reason: string;
-  approval_status: ApprovalStatus;
+  approval_status: LenderStatus;
   approval_note: string;
   bio: string;
   listings_count: number;
@@ -541,7 +642,32 @@ export interface AdminMessage {
   resolved_at: string | null;
 }
 
+export interface AdminPromotion {
+  id: number;
+  item_id: number;
+  item_title: string;
+  item_active: boolean;
+  cover_url: string | null;
+  price_per_day: number;
+  owner_id: number;
+  owner_name: string;
+  owner_email: string;
+  days: number;
+  tagline: string;
+  amount: number;
+  status: 'pending' | 'approved' | 'rejected';
+  review_note: string;
+  payment: 'stripe' | 'demo';
+  created_at: string;
+  paid_at: string | null;
+  decided_at: string | null;
+  live_until: string | null;
+}
+
 export const admin = {
+  promotions: (status: 'pending' | 'approved' | 'rejected' | 'all' = 'pending') => request<AdminPromotion[]>('GET', `/admin/promotions?status=${status}`),
+  decidePromotion: (id: number, decision: 'approved' | 'rejected', reason = '') =>
+    request<AdminPromotion>('POST', `/admin/promotions/${id}`, { decision, reason }),
   stats: () => request<AdminStats>('GET', '/admin/stats'),
   actions: () => request<AdminAction[]>('GET', '/admin/actions'),
   users: (p: { q?: string; filter?: 'all' | 'pending' | 'admins' | 'suspended' | 'rejected' }) =>

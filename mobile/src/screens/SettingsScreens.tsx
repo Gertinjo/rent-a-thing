@@ -251,7 +251,7 @@ export function AppearanceScreen({ navigation }: ScreenProps<'Appearance'>) {
         <Text style={s.groupTitle}>Preview</Text>
         <View style={[s.formCard, { gap: 12 }]}>
           <Text style={{ ...type.headline, color: c.text }}>Cordless drill 18V</Text>
-          <Text style={{ ...type.subhead, color: c.text2 }}>€8 / day · Mission</Text>
+          <Text style={{ ...type.subhead, color: c.text2 }}>€8 / day · Qyteza Pejton</Text>
           <Button title="Request" />
         </View>
       </View>

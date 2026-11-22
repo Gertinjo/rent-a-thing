@@ -9,7 +9,8 @@ import { Avatar, Button, Empty, LargeHeader, Segmented, StatusDot, useTabBarSpac
 import type { RootStackParamList } from '../navigation';
 import { Alert } from '../platform';
 import { useRealtime } from '../realtime';
-import { UserBadges } from '../components/Badges';
+import { CLUB_GOLD, UserBadges } from '../components/Badges';
+import HandoverPhotos from '../components/HandoverPhotos';
 import PaymentSheet from '../components/PaymentSheet';
 import { fmtRange, isoDay, makeStyles, money, statusStyle, type, useTheme } from '../theme';
 
@@ -113,7 +114,7 @@ export default function BookingsScreen() {
       actions.push(<Button key="a" size="small" title="Accept" onPress={() => act(b, 'accept')} loading={busyId === b.id} style={{ flex: 1 }} />);
       actions.push(<Button key="d" size="small" variant="secondary" title="Decline" onPress={() => confirm(b, 'decline')} style={{ flex: 1 }} />);
     }
-    if (b.role === 'renter' && b.status === 'accepted' && b.payment_method === 'card' && b.payment_status === 'unpaid')
+    if (b.role === 'renter' && (b.status === 'accepted' || b.status === 'completed') && b.payment_method === 'card' && b.payment_status === 'unpaid')
       actions.push(<Button key="p" size="small" title={`Pay ${money(b.total_price)}`} icon="card" onPress={() => setPaying(b)} style={{ flex: 1 }} />);
     if (b.role === 'owner' && b.status === 'accepted' && b.payment_status === 'cash_due')
       actions.push(<Button key="cash" size="small" variant="secondary" title="Cash received" icon="cash" onPress={() => cashReceived(b)} loading={busyId === b.id} style={{ flex: 1 }} />);
@@ -139,11 +140,15 @@ export default function BookingsScreen() {
                 </Text>
                 <Text style={s.meta}>
                   {fmtRange(b.start_date, b.end_date)} · {b.days} day{b.days > 1 ? 's' : ''} · {money(b.total_price)}
-                  {b.club_discount && b.club_discount > 0 ? ` · −${money(b.club_discount)} club` : ''}
+                  {b.club_discount && b.club_discount > 0 ? <Text style={{ color: CLUB_GOLD, fontWeight: '700' }}> · Rent Club −{money(b.club_discount)}</Text> : null}
+                  {b.role === 'renter' && !!b.discount_amount && b.discount_amount > 0 ? (
+                    <Text style={{ color: c.accent, fontWeight: '700' }}> · {b.discount_code} −{money(b.discount_amount)}</Text>
+                  ) : null}
                 </Text>
-                {b.role === 'owner' && b.owner_payout != null && (b.platform_fee ?? 0) > 0 && (
+                {b.role === 'owner' && b.owner_payout != null && ((b.platform_fee ?? 0) > 0 || !!b.fee_label) && (
                   <Text style={[s.meta, { color: c.text }]}>
-                    You get {money(b.owner_payout)} · {money(b.platform_fee!)} service fee
+                    You get {money(b.owner_payout)} · {(b.platform_fee ?? 0) > 0 ? `${money(b.platform_fee!)} service fee` : 'no service fee'}
+                    {!!b.fee_label && <Text style={{ fontWeight: '700' }}> ({b.fee_label})</Text>}
                   </Text>
                 )}
               </View>
@@ -168,6 +173,7 @@ export default function BookingsScreen() {
               )}
             </View>
             <PaymentLine b={b} />
+            <HandoverPhotos booking={b} onChange={(nb) => setAll((prev) => prev.map((x) => (x.id === nb.id ? nb : x)))} />
             {!!b.message && <Text style={s.msg}>“{b.message}”</Text>}
             {actions.length > 0 && <View style={{ flexDirection: 'row', gap: 8 }}>{actions}</View>}
             {b.reviewed_by_me && <Text style={[s.meta, { fontSize: 13 }]}>You reviewed this rental</Text>}

@@ -1,4 +1,4 @@
-# Security — Rent a Thing
+# Security — Rentify
 
 A review of the app before the hackathon demo: what was wrong, what is fixed, and what is still open.
 

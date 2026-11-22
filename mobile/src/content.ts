@@ -6,10 +6,10 @@
  */
 
 export const APP = {
-  name: 'Rent a Thing',
+  name: 'Rentify',
   version: '1.0.0',
-  company: 'Rent a Thing',
-  supportEmail: 'support@rentathing.app',
+  company: 'Rentify',
+  supportEmail: 'support@rentify.app',
   responseTime: 'within 24 hours',
   updated: 'November 21, 2026',
 };
@@ -73,7 +73,7 @@ export const LEGAL: Record<LegalDoc, { title: string; sections: { h: string; p: 
       },
       {
         h: '6. Payments, service fee and deposits',
-        p: 'Prices are set by owners and shown before you request. Renters pay the listed price. Rent a Thing keeps a 10% service fee from each rental (for example €1 on a €10 rental, €2 on €20) and the owner receives the rest. Deposits are refundable and should be returned promptly when the item comes back as agreed.',
+        p: 'Prices are set by owners and shown before you request. Renters pay the listed price. Rentify keeps a 10% service fee from each rental (for example €1 on a €10 rental, €2 on €20) and the owner receives the rest. Deposits are refundable and should be returned promptly when the item comes back as agreed.',
       },
       {
         h: '7. Cancellations',
@@ -162,7 +162,7 @@ export function lenderTerms(fee: number): { icon: string; title: string; text: s
     {
       icon: 'cash-outline',
       title: `${fee}% service fee`,
-      text: `Rent a Thing keeps ${fee}% of each rental: ${ex(10)} on a €10 rental, ${ex(20)} on €20. You receive the rest. Renters pay the price you set.`,
+      text: `Rentify keeps ${fee}% of each rental: ${ex(10)} on a €10 rental, ${ex(20)} on €20. You receive the rest. Renters pay the price you set.`,
     },
     { icon: 'camera-outline', title: 'Show the real item', text: 'Photos and the 360° view must show your actual item and its real condition, including any damage.' },
     { icon: 'shield-checkmark-outline', title: 'Safe and legal only', text: 'No weapons, drugs, hazardous or recalled products, stolen or counterfeit goods. You must own the item or be allowed to lend it.' },

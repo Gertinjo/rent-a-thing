@@ -19,7 +19,7 @@ from datetime import datetime
 from fastapi import HTTPException
 
 from .ai import _load_env  # re-reads backend/.env, so adding a key needs no restart
-from .models import Booking
+from .models import Booking, Promotion
 
 log = logging.getLogger("rentathing.payments")
 
@@ -82,7 +82,8 @@ def _check_payable(b: Booking) -> None:
         raise HTTPException(400, "This booking is paid in cash on pick-up")
     if b.payment_status == PAID:
         raise HTTPException(400, "Already paid")
-    if b.status != "accepted":
+    # "completed" too: the owner can mark a card booking returned before the renter paid, and it still has to be payable.
+    if b.status not in ("accepted", "completed"):
         raise HTTPException(400, "You can pay once the owner has confirmed the booking")
 
 
@@ -114,7 +115,7 @@ def start_checkout(b: Booking, base_url: str) -> dict:
                         "unit_amount": int(round(b.total_price * 100)),
                         "product_data": {
                             "name": f"{b.item.title} · {b.days} day{'s' if b.days > 1 else ''}",
-                            "description": f"Rent a Thing booking #{b.id}, {b.start_date:%d %b} – {b.end_date:%d %b}",
+                            "description": f"Rentify booking #{b.id}, {b.start_date:%d %b} – {b.end_date:%d %b}",
                         },
                     },
                 }
@@ -144,7 +145,10 @@ def confirm_stripe(b: Booking, session_id: str | None = None) -> bool:
     except Exception as e:
         log.warning("stripe retrieve failed: %s", e)
         raise HTTPException(502, "Couldn’t reach Stripe to confirm the payment. Try again in a moment.")
-    if (s.metadata or {}).get("booking_id") != str(b.id):
+    # stripe>=13 objects are not dicts (.get() raises), so convert before reading.
+    m = s.metadata
+    meta = m.to_dict() if hasattr(m, "to_dict") else dict(m or {})
+    if meta.get("booking_id") != str(b.id):
         raise HTTPException(400, "That payment belongs to another booking")
     if s.payment_status != "paid":
         return False
@@ -155,6 +159,12 @@ def confirm_stripe(b: Booking, session_id: str | None = None) -> bool:
 
 def pay_simulated(b: Booking, card_number: str, exp: str, cvc: str) -> None:
     _check_payable(b)
+    check_sim_card(card_number, exp, cvc)
+    _mark_paid(b, f"pi_sim_{uuid.uuid4().hex[:16]}")
+
+
+def check_sim_card(card_number: str, exp: str, cvc: str) -> None:
+    """Demo checkout: accept only Stripe's test card numbers. Raises 402 like a real decline."""
     if mode() != "simulated":
         raise HTTPException(400, "Card payments go through Stripe Checkout")
     number = "".join(ch for ch in card_number if ch.isdigit())
@@ -166,7 +176,6 @@ def pay_simulated(b: Booking, card_number: str, exp: str, cvc: str) -> None:
         raise HTTPException(402, "Enter the 3-digit CVC")
     if (err := SIM_CARDS[number]) is not None:
         raise HTTPException(402, err)
-    _mark_paid(b, f"pi_sim_{uuid.uuid4().hex[:16]}")
 
 
 def _valid_expiry(exp: str) -> bool:
@@ -197,8 +206,8 @@ def refund_if_paid(b: Booking) -> bool:
     return True
 
 
-def handle_webhook(payload: bytes, signature: str | None) -> tuple[str, int | None, str | None]:
-    """Optional: verify a Stripe webhook. Returns (event type, booking id, payment intent)."""
+def handle_webhook(payload: bytes, signature: str | None) -> tuple[str, dict, str | None]:
+    """Optional: verify a Stripe webhook. Returns (event type, metadata, payment intent)."""
     _load_env()
     secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
     if not secret:
@@ -210,6 +219,96 @@ def handle_webhook(payload: bytes, signature: str | None) -> tuple[str, int | No
     except Exception:
         raise HTTPException(400, "Invalid signature")
     obj = event["data"]["object"]
-    booking = (obj.get("metadata") or {}).get("booking_id")
+    obj = obj.to_dict() if hasattr(obj, "to_dict") else dict(obj)
+    meta = obj.get("metadata") or {}
+    meta = meta.to_dict() if hasattr(meta, "to_dict") else dict(meta)
     intent = obj.get("payment_intent")
-    return event["type"], int(booking) if booking and str(booking).isdigit() else None, intent if isinstance(intent, str) else None
+    return event["type"], meta, intent if isinstance(intent, str) else None
+
+
+def meta_id(meta: dict, key: str) -> int | None:
+    v = str(meta.get(key) or "")
+    return int(v) if v.isdigit() else None
+
+
+# ---------------------------------------------------------------------------
+# Promotions (home slideshow), paid by card. Same two modes as bookings.
+# ---------------------------------------------------------------------------
+
+# days -> price in EUR
+PROMO_PLANS: dict[int, float] = {3: 15.0, 7: 29.0, 14: 49.0}
+
+
+def start_promo_checkout(p: Promotion, item_title: str, base_url: str) -> dict:
+    out = {"promotion_id": p.id, "amount": p.amount, "currency": "EUR"}
+    if mode() == "simulated":
+        return {**out, "mode": "simulated"}
+    stripe = _stripe()
+    base = base_url.rstrip("/")
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            line_items=[
+                {
+                    "quantity": 1,
+                    "price_data": {
+                        "currency": "eur",
+                        "unit_amount": int(round(p.amount * 100)),
+                        "product_data": {
+                            "name": f"Home slideshow promotion · {p.days} days",
+                            "description": f"Rentify: promote “{item_title}”",
+                        },
+                    },
+                }
+            ],
+            client_reference_id=f"promo-{p.id}",
+            metadata={"promotion_id": str(p.id)},
+            payment_intent_data={"metadata": {"promotion_id": str(p.id)}},
+            success_url=f"{base}/?promo=success&item={p.item_id}&promotion={p.id}&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base}/?promo=cancelled&item={p.item_id}&promotion={p.id}",
+        )
+    except Exception as e:
+        log.warning("stripe promo checkout failed: %s", e)
+        raise HTTPException(502, f"Stripe couldn’t start the payment: {getattr(e, 'user_message', None) or e}")
+    p.stripe_session_id = session.id
+    return {**out, "mode": "stripe", "url": session.url, "session_id": session.id}
+
+
+def confirm_promo_stripe(p: Promotion, session_id: str | None) -> str | None:
+    """Returns the payment intent if Stripe says this promotion's Checkout Session is paid."""
+    sid = session_id or p.stripe_session_id
+    if p.status != UNPAID or not sid or mode() != "stripe":
+        return None
+    try:
+        s = _stripe().checkout.Session.retrieve(sid)
+    except Exception as e:
+        log.warning("stripe retrieve failed: %s", e)
+        raise HTTPException(502, "Couldn’t reach Stripe to confirm the payment. Try again in a moment.")
+    m = s.metadata
+    meta = m.to_dict() if hasattr(m, "to_dict") else dict(m or {})
+    if meta.get("promotion_id") != str(p.id):
+        raise HTTPException(400, "That payment belongs to another order")
+    if s.payment_status != "paid":
+        return None
+    p.stripe_session_id = sid
+    intent = s.payment_intent if isinstance(s.payment_intent, str) else getattr(s.payment_intent, "id", None)
+    return intent or sid
+
+
+def sim_intent() -> str:
+    return f"pi_sim_{uuid.uuid4().hex[:16]}"
+
+
+
+def refund_promotion(p: Promotion) -> None:
+    """Give the money back for a rejected promotion (Stripe test refund, or simulated)."""
+    intent = p.stripe_payment_intent or ""
+    if intent.startswith("pi_") and not intent.startswith("pi_sim_"):
+        if mode() != "stripe":
+            log.warning("promotion %s was paid with Stripe but no test key is configured; marking refunded locally", p.id)
+            return
+        try:
+            _stripe().Refund.create(payment_intent=intent, metadata={"promotion_id": str(p.id)})
+        except Exception as e:
+            log.warning("stripe promo refund failed: %s", e)
+            raise HTTPException(502, "Stripe couldn’t refund the payment, so the promotion wasn’t rejected. Try again.")

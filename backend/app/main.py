@@ -1,4 +1,6 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,10 +15,21 @@ from .routers import admin, ai_routes, bookings, chat_routes, club_routes, geo, 
 Base.metadata.create_all(bind=engine)
 upgrade_schema()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    from .reminders import reminder_loop
+
+    task = asyncio.create_task(reminder_loop())  # pick-up / return reminders every 10 minutes
+    yield
+    task.cancel()
+
+
 app = FastAPI(
-    title="Rent a Thing API",
+    title="Rentify API",
     description="Neighbors rent out tools, cameras, tents and bikes by the day.",
     version="1.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -92,8 +105,11 @@ def public_config():
     from .database import SessionLocal
 
     with SessionLocal() as db:
-        fee = float(services.get_setting_str(db, "platform_fee_percent"))
-    return {"platform_fee_percent": fee, "currency": "EUR", "currency_symbol": "€"}
+        fee = services.base_fee_percent(db)
+        periods = services.upcoming_fee_periods(db)
+    from . import city
+
+    return {"platform_fee_percent": fee, "fee_periods": periods, "currency": "EUR", "currency_symbol": "€", "home_city": city.config()}
 
 
 # Desktop admin console (plain HTML/JS, no build step): http://<server>:8000/admin
